@@ -77,7 +77,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "http://host.docker.internal:8000/api/v1/search_shorts",
+        "url": "http://youtube-api:8000/api/v1/search_shorts",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
@@ -296,7 +296,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "http://host.docker.internal:8000/api/v1/get_transcript",
+        "url": "http://youtube-api:8000/api/v1/get_transcript",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [

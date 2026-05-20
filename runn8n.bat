@@ -1,0 +1,1 @@
+docker run -it --rm --name n8n -p 5678:5678 -e N8N_EDITOR_BASE_URL=https://unmaledictory-nasally-tanika.ngrok-free.dev -e WEBHOOK_URL=https://unmaledictory-nasally-tanika.ngrok-free.dev -e N8N_EXECUTE_COMMAND_ENABLED=true -v n8n_data:/home/node/.n8n docker.n8n.io/n8nio/n8n 

@@ -16,7 +16,36 @@ Telegram → n8n → FastAPI → yt-dlp → YouTube
 
 ## Быстрый старт
 
-### 1. Зависимости
+### Вариант A: Docker Compose (рекомендуется)
+
+Поднимает n8n + FastAPI + ngrok одной командой.
+
+**1. Заполни `.env`:**
+
+```env
+API_KEY=замени_на_надёжный_секрет
+NGROK_DOMAIN=unmaledictory-nasally-tanika.ngrok-free.dev
+NGROK_AUTHTOKEN=твой_токен_из_ngrok_dashboard
+```
+
+`NGROK_AUTHTOKEN` берётся на [dashboard.ngrok.com](https://dashboard.ngrok.com) → Your Authtoken.
+
+**2. Запусти:**
+
+```bash
+start_compose.bat
+# или
+docker compose up --build -d
+```
+
+**3. Импортируй `workflow_v3.json` в n8n** — URL уже настроен на `http://youtube-api:8000`.
+
+Логи: `docker compose logs -f`  
+Остановить: `docker compose down`
+
+---
+
+### Вариант B: FastAPI локально (без Docker)
 
 ```bash
 python -m venv .venv
@@ -30,22 +59,24 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Отредактируй `.env`:
+Отредактируй `.env` (нужны только `API_KEY` и порт, ngrok-поля не нужны):
 
 ```env
 API_KEY=замени_на_надёжный_секрет
 LOG_LEVEL=INFO
-HOST=0.0.0.0
-PORT=8000
 ```
 
-### 3. Запуск
+### 3. Запуск FastAPI
 
 ```bash
 start.bat
 # или
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
+
+n8n запускай через `runn8n.bat`, ngrok — через `ngrok_start.bat`.
+
+> ⚠️ В этом варианте в нодах workflow нужен URL `http://host.docker.internal:8000` вместо `http://youtube-api:8000`.
 
 Документация API: http://localhost:8000/docs
 
@@ -80,13 +111,16 @@ curl -X POST http://localhost:8000/api/v1/get_transcript \
 
 ## n8n воркфлоу
 
-Импортируй `workflow_v2.json` в n8n.
-
-**Важно:** n8n запускается в Docker — для доступа к FastAPI на хосте используется адрес `host.docker.internal:8000`.
+Импортируй `workflow_v3.json` в n8n.
 
 После импорта замени `change_me_to_a_strong_secret` на свой ключ в нодах:
 - Search Shorts (FastAPI)
 - Get Transcript (FastAPI)
+
+| Способ запуска | URL в нодах workflow |
+|---|---|
+| Docker Compose (`start_compose.bat`) | `http://youtube-api:8000` ✅ уже в v3 |
+| Локально (`runn8n.bat` + `start.bat`) | `http://host.docker.internal:8000` |
 
 ### Цепочка нод
 
@@ -94,7 +128,7 @@ curl -X POST http://localhost:8000/api/v1/get_transcript \
 Telegram Trigger
   → Expand Queries (GPT: расширяет тему в поисковые запросы)
   → Parse Queries (Code: парсит JSON ответ GPT)
-  → Search Shorts (FastAPI: yt-dlp поиск)
+  → Search Shorts (FastAPI: yt-dlp поиск + фильтр по просмотрам)
   → Enrich Shorts (Code: добавляет тему к каждому шорту)
   → Split Shorts (Split Out: разбивает массив)
   → Get Transcript (FastAPI: транскрипция)
@@ -107,7 +141,13 @@ Telegram Trigger
   → Send to Telegram
 ```
 
-### Запуск n8n через Docker + ngrok
+### Запуск через Docker Compose (рекомендуется)
+
+```bash
+start_compose.bat
+```
+
+### Запуск n8n вручную (старый способ)
 
 ```bash
 docker run -it --rm --name n8n \

@@ -1,0 +1,54 @@
+services:
+  youtube-api:
+    build: .
+    container_name: youtube-api
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./logs:/app/logs
+    networks:
+      - n8n-net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  n8n:
+    image: docker.n8n.io/n8nio/n8n
+    container_name: n8n
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    environment:
+      - N8N_EDITOR_BASE_URL=https://${NGROK_DOMAIN}
+      - WEBHOOK_URL=https://${NGROK_DOMAIN}
+      - N8N_EXECUTE_COMMAND_ENABLED=true
+    volumes:
+      - n8n_data:/home/node/.n8n
+    networks:
+      - n8n-net
+    depends_on:
+      youtube-api:
+        condition: service_healthy
+
+  ngrok:
+    image: ngrok/ngrok:latest
+    container_name: ngrok
+    restart: unless-stopped
+    command: http n8n:5678 --domain=${NGROK_DOMAIN}
+    environment:
+      - NGROK_AUTHTOKEN=${NGROK_AUTHTOKEN}
+    networks:
+      - n8n-net
+    depends_on:
+      - n8n
+
+volumes:
+  n8n_data:
+
+networks:
+  n8n-net:
+    driver: bridge
