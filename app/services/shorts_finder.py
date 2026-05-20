@@ -26,7 +26,9 @@ _BASE_OPTS: dict[str, Any] = {
 
 def _build_search_url(query: str, max_results: int) -> str:
     """Build a yt-dlp search URL that returns videos."""
-    return f"ytsearch{max_results}:{query} #shorts"
+    # Using "shorts" as a keyword (not hashtag) works more reliably across niches.
+    # #shorts hashtag causes YouTube to return 0 results for many topics.
+    return f"ytsearch{max_results}:{query} shorts"
 
 
 def _entry_to_short_meta(entry: dict[str, Any]) -> ShortMeta | None:

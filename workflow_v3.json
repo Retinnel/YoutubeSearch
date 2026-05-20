@@ -93,7 +93,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\"query\": \"{{ $json.query }}\", \"max_results\": 20, \"min_views\": 10000}",
+        "jsonBody": "={\"query\": \"{{ $json.query }}\", \"max_results\": 30, \"min_views\": 0}",
         "options": {}
       },
       "type": "n8n-nodes-base.httpRequest",
