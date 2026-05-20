@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 class SearchShortsRequest(BaseModel):
     query: str = Field(..., min_length=1, description="YouTube search query")
     max_results: int = Field(20, ge=1, le=50, description="Max number of shorts to return")
+    min_views: int = Field(0, ge=0, description="Minimum view count filter (0 = no filter)")
 
 
 class ShortMeta(BaseModel):
@@ -18,6 +19,7 @@ class ShortMeta(BaseModel):
     channel_id: Optional[str] = None
     channel_title: Optional[str] = None
     duration: Optional[int] = None  # seconds
+    view_count: Optional[int] = None
 
 
 class SearchShortsResponse(BaseModel):

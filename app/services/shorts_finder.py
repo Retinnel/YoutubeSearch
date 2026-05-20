@@ -43,6 +43,8 @@ def _entry_to_short_meta(entry: dict[str, Any]) -> ShortMeta | None:
     if not video_id:
         return None
 
+    view_count = entry.get("view_count")
+
     return ShortMeta(
         video_id=video_id,
         url=f"https://www.youtube.com/shorts/{video_id}",
@@ -50,10 +52,11 @@ def _entry_to_short_meta(entry: dict[str, Any]) -> ShortMeta | None:
         channel_id=entry.get("channel_id") or entry.get("uploader_id"),
         channel_title=entry.get("channel") or entry.get("uploader"),
         duration=int(duration) if duration else None,
+        view_count=int(view_count) if view_count is not None else None,
     )
 
 
-def _search_sync(query: str, max_results: int) -> list[ShortMeta]:
+def _search_sync(query: str, max_results: int, min_views: int = 0) -> list[ShortMeta]:
     """Synchronous yt-dlp search. Runs in a thread pool."""
     url = _build_search_url(query, max_results)
     log.debug(f"yt-dlp search | url={url}")
@@ -75,22 +78,27 @@ def _search_sync(query: str, max_results: int) -> list[ShortMeta]:
     entries = info.get("entries") or []
     for entry in entries:
         meta = _entry_to_short_meta(entry)
-        if meta:
-            shorts.append(meta)
+        if not meta:
+            continue
+        if min_views > 0 and (meta.view_count is None or meta.view_count < min_views):
+            log.debug(f"Skipped (views={meta.view_count} < min={min_views}) | {meta.video_id}")
+            continue
+        shorts.append(meta)
 
-    log.info(f"Search done | query='{query}' | found={len(shorts)} shorts (from {len(entries)} results)")
+    log.info(f"Search done | query='{query}' | found={len(shorts)} shorts (from {len(entries)} results, min_views={min_views})")
     return shorts
 
 
-async def search_shorts(query: str, max_results: int = 20) -> list[ShortMeta]:
+async def search_shorts(query: str, max_results: int = 20, min_views: int = 0) -> list[ShortMeta]:
     """
     Search YouTube for Shorts matching `query` without using the YouTube Data API.
 
-    Uses yt-dlp with `ytsearch:` extractor and filters by duration ≤ 65 seconds.
+    Uses yt-dlp with `ytsearch:` extractor and filters by duration ≤ 180 seconds.
+    Optionally filters by minimum view count.
     Runs the blocking yt-dlp call in a thread pool to stay async.
     """
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _search_sync, query, max_results)
+    return await loop.run_in_executor(None, _search_sync, query, max_results, min_views)
 
 
 def _get_channel_shorts_sync(channel_id: str, max_shorts: int) -> list[ShortMeta]:

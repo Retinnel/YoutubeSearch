@@ -93,8 +93,8 @@ async def search_shorts_endpoint(body: SearchShortsRequest):
     Uses yt-dlp internally — no YouTube Data API quota consumed.
     Returns metadata (video_id, URL, title, channel, duration) for each short found.
     """
-    log.info(f"search_shorts | query='{body.query}' | max_results={body.max_results}")
-    shorts = await search_shorts(body.query, body.max_results)
+    log.info(f"search_shorts | query='{body.query}' | max_results={body.max_results} | min_views={body.min_views}")
+    shorts = await search_shorts(body.query, body.max_results, body.min_views)
     return SearchShortsResponse(query=body.query, shorts=shorts, total=len(shorts))
 
 
