@@ -175,7 +175,11 @@ def _get_via_ytdlp(video_id: str, language: str, cookies_file: str = "") -> tupl
             "outtmpl": os.path.join(tmp_dir, "%(id)s.%(ext)s"),
         }
         if cookies_file and os.path.exists(cookies_file):
-            opts["cookiefile"] = cookies_file
+            # yt-dlp updates cookie timestamps in-place, so copy to a writable temp file
+            import shutil
+            tmp_cookies = os.path.join(tmp_dir, "cookies.txt")
+            shutil.copy2(cookies_file, tmp_cookies)
+            opts["cookiefile"] = tmp_cookies
 
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
