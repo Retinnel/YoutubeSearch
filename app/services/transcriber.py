@@ -11,14 +11,20 @@ Strategy:
 Cookies:
 Set COOKIES_FILE=/path/to/cookies.txt in .env to bypass YouTube bot-detection.
 Export via browser extension: "Get cookies.txt LOCALLY" (Chrome) or "cookies.txt" (Firefox).
+
+Rate limiting:
+Both methods retry up to 3 times with exponential backoff on 429 / IP block errors.
 """
 from __future__ import annotations
 
 import asyncio
 import http.cookiejar
+import json
 import os
 import re
+import shutil
 import tempfile
+import time
 import glob as _glob
 from collections import Counter
 from typing import Optional
@@ -31,6 +37,14 @@ from app.models import TranscriptResponse
 from app.utils.logger import get_logger
 
 log = get_logger(__name__)
+
+# ── Retry configuration ───────────────────────────────────────────────────────
+
+_MAX_RETRIES = 3
+_RETRY_DELAYS = [2, 5, 10]  # seconds between retries
+
+# Strings in exception messages that indicate a retryable rate-limit condition
+_RATE_LIMIT_MARKERS = ["429", "too many requests", "ip", "blocked", "sign in to confirm"]
 
 # ── Transcript quality check (ported from subproject analyzer.py) ─────────────
 
@@ -105,8 +119,16 @@ def _join_transcript(snippets) -> str:
 
 
 def _build_requests_session(cookies_file: str) -> Session:
-    """Build a requests Session pre-loaded with browser cookies."""
+    """Build a requests Session pre-loaded with browser cookies and realistic headers."""
     session = Session()
+    session.headers.update({
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    })
     if cookies_file and os.path.exists(cookies_file):
         try:
             jar = http.cookiejar.MozillaCookieJar(cookies_file)
@@ -118,91 +140,175 @@ def _build_requests_session(cookies_file: str) -> Session:
     return session
 
 
+def _is_rate_limited(exc: Exception) -> bool:
+    """Return True if the exception looks like a transient rate-limit / IP-block."""
+    msg = str(exc).lower()
+    return any(m in msg for m in _RATE_LIMIT_MARKERS)
+
+
 # ── Core transcript methods ────────────────────────────────────────────────────
 
 def _get_via_api(video_id: str, language: str, cookies_file: str = "") -> tuple[str, str] | None:
     """
-    Try youtube-transcript-api (v1.x).
+    Try youtube-transcript-api (v1.x) with retry on rate-limit errors.
     Returns (transcript_text, language_code) or None on failure.
     """
-    try:
-        session = _build_requests_session(cookies_file)
-        api = YouTubeTranscriptApi(http_client=session)
-
-        # 1. Try the requested language directly (fastest path)
+    for attempt in range(_MAX_RETRIES):
         try:
-            fetched = api.fetch(video_id, languages=[language, "en"])
-            text = _join_transcript(fetched)
-            if text:
-                return text, language
-        except Exception:
-            pass
+            session = _build_requests_session(cookies_file)
+            api = YouTubeTranscriptApi(http_client=session)
 
-        # 2. Try listing all available transcripts and take any
-        try:
-            transcript_list = api.list(video_id)
-            transcript = next(iter(transcript_list))
-            fetched = transcript.fetch()
-            text = _join_transcript(fetched)
-            if text:
-                return text, transcript.language_code
-        except Exception:
-            pass
+            # 1. Try the requested language directly (fastest path)
+            try:
+                fetched = api.fetch(video_id, languages=[language, "en"])
+                text = _join_transcript(fetched)
+                if text:
+                    return text, language
+            except Exception:
+                pass
 
-    except Exception as exc:
-        log.warning(f"Transcript API error | video_id={video_id} | {exc}")
+            # 2. List all available transcripts and take any
+            try:
+                transcript_list = api.list(video_id)
+                transcript = next(iter(transcript_list))
+                fetched = transcript.fetch()
+                text = _join_transcript(fetched)
+                if text:
+                    return text, transcript.language_code
+            except Exception:
+                pass
+
+            # Video exists but has no transcripts — no point retrying
+            break
+
+        except Exception as exc:
+            if _is_rate_limited(exc) and attempt < _MAX_RETRIES - 1:
+                wait = _RETRY_DELAYS[attempt]
+                log.warning(f"Transcript API rate-limited | video_id={video_id} | retry {attempt+1}/{_MAX_RETRIES} in {wait}s")
+                time.sleep(wait)
+            else:
+                log.warning(f"Transcript API error | video_id={video_id} | {exc}")
+                break
 
     log.debug(f"Transcript API: no transcript | video_id={video_id}")
+    return None
+
+
+def _parse_json3(path: str) -> str:
+    """Parse YouTube's native json3 subtitle format into plain text."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        parts = []
+        for event in data.get("events", []):
+            segs = event.get("segs")
+            if not segs:
+                continue
+            line = "".join(s.get("utf8", "") for s in segs).strip()
+            line = re.sub(r"\s+", " ", line).strip()
+            if line and line != "\n":
+                parts.append(line)
+        # Deduplicate adjacent identical lines
+        deduped = []
+        last = ""
+        for p in parts:
+            if p != last:
+                deduped.append(p)
+                last = p
+        return " ".join(deduped)
+    except Exception as exc:
+        log.debug(f"json3 parse error for {path}: {exc}")
+        return ""
+
+
+def _parse_subtitle_file(path: str, lang_code: str) -> tuple[str, str] | None:
+    """Parse a subtitle file (vtt or json3) and return (text, lang_code) or None."""
+    ext = os.path.splitext(path)[-1].lower()
+    try:
+        if ext == ".vtt":
+            text = _parse_vtt(path)
+        elif ext == ".json3":
+            text = _parse_json3(path)
+        else:
+            # Try VTT parser as generic fallback
+            text = _parse_vtt(path)
+        if text and len(text.strip()) > 10:
+            return text, lang_code
+    except Exception as exc:
+        log.debug(f"Subtitle parse error {path}: {exc}")
     return None
 
 
 def _get_via_ytdlp(video_id: str, language: str, cookies_file: str = "") -> tuple[str, str] | None:
     """
     Fallback: download auto-generated subtitles with yt-dlp (no video).
+    Uses Node.js (via yt-dlp-ejs) to solve YouTube's n-challenge.
+    Supports VTT and JSON3 subtitle formats.
     Returns (transcript_text, language_code) or None on failure.
     """
     url = f"https://www.youtube.com/watch?v={video_id}"
 
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        opts = {
-            "quiet": True,
-            "no_warnings": True,
-            "skip_download": True,
-            "writeautomaticsub": True,
-            "writesubtitles": True,
-            "subtitleslangs": [language, "en"],
-            "subtitlesformat": "vtt",
-            "outtmpl": os.path.join(tmp_dir, "%(id)s.%(ext)s"),
-        }
-        if cookies_file and os.path.exists(cookies_file):
-            # yt-dlp updates cookie timestamps in-place, so copy to a writable temp file
-            import shutil
-            tmp_cookies = os.path.join(tmp_dir, "cookies.txt")
-            shutil.copy2(cookies_file, tmp_cookies)
-            opts["cookiefile"] = tmp_cookies
+    for attempt in range(_MAX_RETRIES):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            opts = {
+                "quiet": True,
+                "no_warnings": True,
+                "skip_download": True,
+                "writeautomaticsub": True,
+                "writesubtitles": True,
+                "subtitleslangs": [language, "en"],
+                # No subtitlesformat restriction — accept VTT or JSON3
+                "outtmpl": os.path.join(tmp_dir, "%(id)s.%(ext)s"),
+                # Use Node.js runtime for n-challenge (yt-dlp-ejs package provides solver script)
+                "js_runtimes": {"node": {}},
+            }
+            if cookies_file and os.path.exists(cookies_file):
+                # yt-dlp updates cookie timestamps in-place, so copy to a writable temp file
+                tmp_cookies = os.path.join(tmp_dir, "cookies.txt")
+                shutil.copy2(cookies_file, tmp_cookies)
+                opts["cookiefile"] = tmp_cookies
 
-        try:
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                ydl.download([url])
-        except Exception as exc:
-            log.warning(f"yt-dlp subtitle download error | video_id={video_id} | {exc}")
-            return None
+            error_msg = ""
+            try:
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    ydl.download([url])
+            except Exception as exc:
+                error_msg = str(exc)
+                if _is_rate_limited(exc) and attempt < _MAX_RETRIES - 1:
+                    wait = _RETRY_DELAYS[attempt]
+                    log.warning(f"yt-dlp rate-limited | video_id={video_id} | retry {attempt+1}/{_MAX_RETRIES} in {wait}s")
+                    time.sleep(wait)
+                    continue
+                elif "requested format is not available" in error_msg.lower():
+                    # Video has no subtitles in any format — not retryable
+                    log.debug(f"yt-dlp: no subtitles available | video_id={video_id}")
+                    return None
+                else:
+                    log.warning(f"yt-dlp subtitle download error | video_id={video_id} | {exc}")
+                    return None
 
-        # Find downloaded .vtt file
-        vtt_files = _glob.glob(os.path.join(tmp_dir, "*.vtt"))
-        if not vtt_files:
-            log.debug(f"yt-dlp: no .vtt file found | video_id={video_id}")
-            return None
+            # Find any downloaded subtitle file (vtt or json3)
+            subtitle_files = [
+                f for f in _glob.glob(os.path.join(tmp_dir, "*"))
+                if not f.endswith("cookies.txt") and os.path.splitext(f)[-1].lower() in (".vtt", ".json3", ".srv1", ".srv2", ".srv3", ".ttml")
+            ]
+            if not subtitle_files:
+                log.debug(f"yt-dlp: no subtitle file found | video_id={video_id}")
+                return None
 
-        vtt_path = vtt_files[0]
-        lang_code = os.path.basename(vtt_path).rsplit(".", 2)[-2] if "." in vtt_path else language
+            for sub_path in subtitle_files:
+                # Extract language code from filename like video_id.en.vtt or video_id.en-orig.json3
+                basename = os.path.basename(sub_path)
+                parts = basename.rsplit(".", 2)
+                detected_lang = parts[-2] if len(parts) >= 3 else language
 
-        try:
-            text = _parse_vtt(vtt_path)
-            if text:
-                return text, lang_code
-        except Exception as exc:
-            log.warning(f"VTT parse error | video_id={video_id} | {exc}")
+                result = _parse_subtitle_file(sub_path, detected_lang)
+                if result:
+                    return result
+
+        # If we got here without returning, something went wrong — retry
+        if attempt < _MAX_RETRIES - 1:
+            time.sleep(_RETRY_DELAYS[attempt])
 
     return None
 

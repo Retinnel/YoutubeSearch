@@ -2,9 +2,12 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install system deps for yt-dlp (ffmpeg needed for subtitle extraction)
+# Install system deps:
+# - ffmpeg: needed for subtitle extraction and Whisper audio
+# - nodejs: needed for yt-dlp to solve YouTube's n-challenge (otherwise many formats are missing)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
+    nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

@@ -163,11 +163,9 @@ class TestYtdlpCookiesCopy:
         with patch("app.services.transcriber.yt_dlp.YoutubeDL", FakeYDL):
             _get_via_ytdlp("dQw4w9WgXcQ", "en", str(cookies))
 
-        # cookiefile should be set
         assert "cookiefile" in captured_opts
         # It should point to a DIFFERENT path (the temp copy), not the original
         assert captured_opts["cookiefile"] != str(cookies)
-        # The temp copy should exist and be inside a temp directory
-        assert os.path.exists(captured_opts["cookiefile"]) or True  # may be cleaned up by tmp dir
-        # The copy path ends with cookies.txt
         assert captured_opts["cookiefile"].endswith("cookies.txt")
+        # js_runtimes should be set for n-challenge solving
+        assert "js_runtimes" in captured_opts
