@@ -8,6 +8,9 @@ services:
       - "8000:8000"
     volumes:
       - ./logs:/app/logs
+      # Mount cookies.txt if it exists (needed to bypass YouTube bot-detection)
+      # Export from your browser: Chrome → "Get cookies.txt LOCALLY" extension
+      - ./cookies.txt:/app/cookies.txt:ro
     networks:
       - n8n-net
     healthcheck:

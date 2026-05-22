@@ -26,3 +26,6 @@ Thumbs.db
 
 # Subproject (separate repo, not tracked here)
 subproject/
+
+# Browser cookies (personal data, never commit)
+cookies.txt

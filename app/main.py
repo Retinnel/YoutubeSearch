@@ -158,7 +158,7 @@ async def get_transcript_endpoint(body: GetTranscriptRequest):
     Returns `null` transcript (not an error) when no captions are available.
     """
     log.info(f"get_transcript | video_id={body.video_id} | language={body.language}")
-    result = await get_transcript(body.video_id, body.language, use_whisper=settings.whisper_enabled)
+    result = await get_transcript(body.video_id, body.language, use_whisper=settings.whisper_enabled, cookies_file=settings.cookies_file)
     return result
 
 
@@ -187,9 +187,9 @@ async def process_channel_endpoint(body: ProcessChannelRequest):
     # Fetch all transcripts concurrently
     import asyncio
     transcript_tasks = [
-        get_transcript(s.video_id, body.language, use_whisper=settings.whisper_enabled)
-        for s in shorts_meta
-    ]
+            get_transcript(s.video_id, body.language, use_whisper=settings.whisper_enabled, cookies_file=settings.cookies_file)
+            for s in shorts_meta
+        ]
     transcripts = await asyncio.gather(*transcript_tasks)
 
     results: list[ShortWithTranscript] = []

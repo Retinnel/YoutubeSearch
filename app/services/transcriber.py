@@ -7,10 +7,15 @@ Strategy:
 3. Optional fallback: OpenAI Whisper (local audio transcription, off by default).
    Enable via WHISPER_ENABLED=true in .env. Requires openai-whisper + ffmpeg.
 4. On any failure: return error string, never raise.
+
+Cookies:
+Set COOKIES_FILE=/path/to/cookies.txt in .env to bypass YouTube bot-detection.
+Export via browser extension: "Get cookies.txt LOCALLY" (Chrome) or "cookies.txt" (Firefox).
 """
 from __future__ import annotations
 
 import asyncio
+import http.cookiejar
 import os
 import re
 import tempfile
@@ -19,7 +24,8 @@ from collections import Counter
 from typing import Optional
 
 import yt_dlp
-from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
+from requests import Session
+from youtube_transcript_api import YouTubeTranscriptApi
 
 from app.models import TranscriptResponse
 from app.utils.logger import get_logger
@@ -80,45 +86,77 @@ def is_usable_transcript(transcript: Optional[str]) -> tuple[bool, str]:
     return True, "ok"
 
 
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _join_transcript(snippets) -> str:
+    """Join transcript snippet objects (dicts or TypedDicts) into plain text."""
+    parts = []
+    for s in snippets:
+        # FetchedTranscriptSnippet in v1.x is a TypedDict (dict-like)
+        if hasattr(s, "get"):
+            text = (s.get("text") or "").strip()
+        elif hasattr(s, "text"):
+            text = (s.text or "").strip()
+        else:
+            text = str(s).strip()
+        if text:
+            parts.append(text)
+    return " ".join(parts)
+
+
+def _build_requests_session(cookies_file: str) -> Session:
+    """Build a requests Session pre-loaded with browser cookies."""
+    session = Session()
+    if cookies_file and os.path.exists(cookies_file):
+        try:
+            jar = http.cookiejar.MozillaCookieJar(cookies_file)
+            jar.load(ignore_discard=True, ignore_expires=True)
+            session.cookies = jar  # type: ignore[assignment]
+            log.debug(f"Loaded cookies from {cookies_file}")
+        except Exception as exc:
+            log.warning(f"Failed to load cookies file {cookies_file}: {exc}")
+    return session
+
+
 # ── Core transcript methods ────────────────────────────────────────────────────
 
-def _join_transcript(snippets: list[dict]) -> str:
-    """Join transcript snippet dicts into a single text block."""
-    return " ".join(s.get("text", "").strip() for s in snippets if s.get("text", "").strip())
-
-
-def _get_via_api(video_id: str, language: str) -> tuple[str, str] | None:
+def _get_via_api(video_id: str, language: str, cookies_file: str = "") -> tuple[str, str] | None:
     """
-    Try youtube-transcript-api.
+    Try youtube-transcript-api (v1.x).
     Returns (transcript_text, language_code) or None on failure.
     """
     try:
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        session = _build_requests_session(cookies_file)
+        api = YouTubeTranscriptApi(http_client=session)
 
-        # Try requested language first, then any manually-created, then auto-generated
-        for lang_code in [language, None]:
-            try:
-                if lang_code:
-                    transcript = transcript_list.find_transcript([lang_code])
-                else:
-                    # Get any available transcript
-                    transcript = next(iter(transcript_list))
-                snippets = transcript.fetch()
-                text = _join_transcript(snippets)
-                if text:
-                    return text, transcript.language_code
-            except Exception:
-                continue
+        # 1. Try the requested language directly (fastest path)
+        try:
+            fetched = api.fetch(video_id, languages=[language, "en"])
+            text = _join_transcript(fetched)
+            if text:
+                return text, language
+        except Exception:
+            pass
 
-    except (TranscriptsDisabled, NoTranscriptFound):
-        log.debug(f"Transcript API: no transcript | video_id={video_id}")
+        # 2. Try listing all available transcripts and take any
+        try:
+            transcript_list = api.list(video_id)
+            transcript = next(iter(transcript_list))
+            fetched = transcript.fetch()
+            text = _join_transcript(fetched)
+            if text:
+                return text, transcript.language_code
+        except Exception:
+            pass
+
     except Exception as exc:
         log.warning(f"Transcript API error | video_id={video_id} | {exc}")
 
+    log.debug(f"Transcript API: no transcript | video_id={video_id}")
     return None
 
 
-def _get_via_ytdlp(video_id: str, language: str) -> tuple[str, str] | None:
+def _get_via_ytdlp(video_id: str, language: str, cookies_file: str = "") -> tuple[str, str] | None:
     """
     Fallback: download auto-generated subtitles with yt-dlp (no video).
     Returns (transcript_text, language_code) or None on failure.
@@ -136,6 +174,8 @@ def _get_via_ytdlp(video_id: str, language: str) -> tuple[str, str] | None:
             "subtitlesformat": "vtt",
             "outtmpl": os.path.join(tmp_dir, "%(id)s.%(ext)s"),
         }
+        if cookies_file and os.path.exists(cookies_file):
+            opts["cookiefile"] = cookies_file
 
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
@@ -145,7 +185,7 @@ def _get_via_ytdlp(video_id: str, language: str) -> tuple[str, str] | None:
             return None
 
         # Find downloaded .vtt file
-        vtt_files = _glob.glob(os.path.join(tmp_dir, f"*.vtt"))
+        vtt_files = _glob.glob(os.path.join(tmp_dir, "*.vtt"))
         if not vtt_files:
             log.debug(f"yt-dlp: no .vtt file found | video_id={video_id}")
             return None
@@ -261,11 +301,11 @@ def _parse_vtt(path: str) -> str:
     return " ".join(lines)
 
 
-def _get_transcript_sync(video_id: str, language: str, use_whisper: bool = False) -> TranscriptResponse:
+def _get_transcript_sync(video_id: str, language: str, use_whisper: bool = False, cookies_file: str = "") -> TranscriptResponse:
     url = f"https://www.youtube.com/shorts/{video_id}"
 
     # 1. Fast path via youtube-transcript-api
-    result = _get_via_api(video_id, language)
+    result = _get_via_api(video_id, language, cookies_file)
     if result:
         text, lang = result
         ok, reason = is_usable_transcript(text)
@@ -274,7 +314,7 @@ def _get_transcript_sync(video_id: str, language: str, use_whisper: bool = False
 
     # 2. Fallback: yt-dlp subtitles
     log.debug(f"Falling back to yt-dlp subtitles | video_id={video_id}")
-    result = _get_via_ytdlp(video_id, language)
+    result = _get_via_ytdlp(video_id, language, cookies_file)
     if result:
         text, lang = result
         ok, reason = is_usable_transcript(text)
@@ -299,7 +339,7 @@ def _get_transcript_sync(video_id: str, language: str, use_whisper: bool = False
     return TranscriptResponse(video_id=video_id, url=url, transcript=None, error=msg)
 
 
-async def get_transcript(video_id: str, language: str = "en", use_whisper: bool = False) -> TranscriptResponse:
+async def get_transcript(video_id: str, language: str = "en", use_whisper: bool = False, cookies_file: str = "") -> TranscriptResponse:
     """
     Async entry point for transcript retrieval.
     Tries youtube-transcript-api first, falls back to yt-dlp subtitles,
@@ -307,5 +347,9 @@ async def get_transcript(video_id: str, language: str = "en", use_whisper: bool 
     Never raises — returns error field on failure.
     """
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _get_transcript_sync, video_id, language, use_whisper)
+    return await loop.run_in_executor(
+        None, _get_transcript_sync, video_id, language, use_whisper, cookies_file
+    )
+
+
 

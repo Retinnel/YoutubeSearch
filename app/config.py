@@ -6,6 +6,10 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     host: str = "0.0.0.0"
     port: int = 8000
+    # Path to a Netscape-format cookies.txt file exported from your browser.
+    # Required to bypass YouTube bot-detection for yt-dlp and transcript API.
+    # Export via browser extension, e.g. "Get cookies.txt LOCALLY" for Chrome.
+    cookies_file: str = ""
     # Set to true to enable Whisper as 3rd transcription fallback.
     # Requires: pip install openai-whisper + ffmpeg in PATH. Much slower.
     whisper_enabled: bool = False
