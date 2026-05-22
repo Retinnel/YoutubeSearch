@@ -4,14 +4,18 @@ Transcript retrieval service.
 Strategy:
 1. Try youtube-transcript-api (fast, no video download).
 2. Fallback: yt-dlp with --write-auto-sub (slower, more reliable).
-3. On any failure: return error string, never raise.
+3. Optional fallback: OpenAI Whisper (local audio transcription, off by default).
+   Enable via WHISPER_ENABLED=true in .env. Requires openai-whisper + ffmpeg.
+4. On any failure: return error string, never raise.
 """
 from __future__ import annotations
 
 import asyncio
 import os
+import re
 import tempfile
 import glob as _glob
+from collections import Counter
 from typing import Optional
 
 import yt_dlp
@@ -22,6 +26,61 @@ from app.utils.logger import get_logger
 
 log = get_logger(__name__)
 
+# ── Transcript quality check (ported from subproject analyzer.py) ─────────────
+
+_MIN_CHARS = 70
+_MIN_WORDS = 12
+_MAX_REPEATED_WORD_SHARE = 0.35
+_MIN_UNIQUE_WORD_SHARE = 0.45
+_GARBAGE_MARKERS = ["traceback", "file \"<string>\"", "unicodeencodeerror", "exception", "error:"]
+
+
+def _transcript_words(text: str) -> list[str]:
+    return re.findall(r"[A-Za-zА-Яа-яЁё]{2,}", text.lower())
+
+
+def is_usable_transcript(transcript: Optional[str]) -> tuple[bool, str]:
+    """
+    Validate transcript quality before sending to LLM.
+    Returns (is_ok, reason) where reason is 'ok' or a short failure code.
+    Ported from subproject/yt/analyzer.py.
+    """
+    text = (transcript or "").strip()
+    if not text:
+        return False, "empty"
+
+    normalized = re.sub(r"\s+", " ", text)
+    lowered = normalized.lower()
+    for marker in _GARBAGE_MARKERS:
+        if marker in lowered:
+            return False, f"garbage:{marker}"
+
+    if len(normalized) < _MIN_CHARS:
+        return False, f"too_short:{len(normalized)}<{_MIN_CHARS}"
+
+    words = _transcript_words(normalized)
+    if len(words) < _MIN_WORDS:
+        return False, f"too_few_words:{len(words)}<{_MIN_WORDS}"
+
+    counts = Counter(words)
+    most_common_count = counts.most_common(1)[0][1] if counts else 0
+    repeated_share = most_common_count / len(words) if words else 0
+    unique_share = len(counts) / len(words) if words else 0
+
+    if repeated_share > _MAX_REPEATED_WORD_SHARE:
+        return False, f"repeated_word:{repeated_share:.2f}"
+    if unique_share < _MIN_UNIQUE_WORD_SHARE:
+        return False, f"low_unique:{unique_share:.2f}"
+
+    sentence_like = re.search(r"[A-Za-zА-Яа-яЁё][^.!?]{18,}[.!?]", normalized)
+    long_phrase = re.search(r"(?:[A-Za-zА-Яа-яЁё]{2,}\W+){4,}[A-Za-zА-Яа-яЁё]{2,}", normalized)
+    if not sentence_like and not long_phrase:
+        return False, "no_sentence"
+
+    return True, "ok"
+
+
+# ── Core transcript methods ────────────────────────────────────────────────────
 
 def _join_transcript(snippets: list[dict]) -> str:
     """Join transcript snippet dicts into a single text block."""
@@ -104,10 +163,77 @@ def _get_via_ytdlp(video_id: str, language: str) -> tuple[str, str] | None:
     return None
 
 
+def _get_via_whisper(video_id: str, language: Optional[str] = None) -> tuple[str, str] | None:
+    """
+    Optional 3rd fallback: download audio and transcribe with OpenAI Whisper locally.
+    Requires: pip install openai-whisper + ffmpeg in PATH.
+    Much slower than subtitle-based methods — use only as last resort.
+    """
+    try:
+        import whisper
+    except ImportError:
+        log.warning("Whisper not installed (pip install openai-whisper). Skipping Whisper fallback.")
+        return None
+
+    url = f"https://www.youtube.com/shorts/{video_id}"
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        audio_path = os.path.join(tmp_dir, f"{video_id}.mp3")
+
+        # Download audio only
+        dl_opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "format": "worstaudio/worst",
+            "outtmpl": audio_path,
+            "postprocessors": [{
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "5",
+            }],
+        }
+        try:
+            with yt_dlp.YoutubeDL(dl_opts) as ydl:
+                ydl.download([url])
+        except Exception as exc:
+            log.warning(f"Whisper: audio download failed | video_id={video_id} | {exc}")
+            return None
+
+        # Find the actual output file (yt-dlp may append extension)
+        found_path = None
+        for candidate in [audio_path, audio_path + ".mp3"]:
+            if os.path.exists(candidate):
+                found_path = candidate
+                break
+        if not found_path:
+            for ext in [".mp3", ".m4a", ".wav", ".opus", ".webm"]:
+                p = os.path.splitext(audio_path)[0] + ext
+                if os.path.exists(p):
+                    found_path = p
+                    break
+        if not found_path:
+            log.warning(f"Whisper: audio file not found after download | video_id={video_id}")
+            return None
+
+        try:
+            log.info(f"Whisper: transcribing | video_id={video_id} | model=base")
+            model = whisper.load_model("base")
+            opts_w = {"fp16": False}
+            if language:
+                opts_w["language"] = language
+            result = model.transcribe(found_path, **opts_w)
+            text = result.get("text", "").strip()
+            if text:
+                detected_lang = result.get("language") or language or "unknown"
+                return text, detected_lang
+        except Exception as exc:
+            log.warning(f"Whisper transcription error | video_id={video_id} | {exc}")
+
+    return None
+
+
 def _parse_vtt(path: str) -> str:
     """Parse a WebVTT subtitle file into plain text, deduplicating adjacent identical lines."""
-    import re
-
     # Metadata/header prefixes to skip
     _SKIP_PREFIXES = ("WEBVTT", "NOTE", "Kind:", "Language:", "STYLE", "REGION")
 
@@ -135,14 +261,15 @@ def _parse_vtt(path: str) -> str:
     return " ".join(lines)
 
 
-def _get_transcript_sync(video_id: str, language: str) -> TranscriptResponse:
+def _get_transcript_sync(video_id: str, language: str, use_whisper: bool = False) -> TranscriptResponse:
     url = f"https://www.youtube.com/shorts/{video_id}"
 
     # 1. Fast path via youtube-transcript-api
     result = _get_via_api(video_id, language)
     if result:
         text, lang = result
-        log.info(f"Transcript OK (api) | video_id={video_id} | lang={lang} | chars={len(text)}")
+        ok, reason = is_usable_transcript(text)
+        log.info(f"Transcript OK (api) | video_id={video_id} | lang={lang} | chars={len(text)} | quality={reason}")
         return TranscriptResponse(video_id=video_id, url=url, transcript=text, language=lang, source="api")
 
     # 2. Fallback: yt-dlp subtitles
@@ -150,20 +277,35 @@ def _get_transcript_sync(video_id: str, language: str) -> TranscriptResponse:
     result = _get_via_ytdlp(video_id, language)
     if result:
         text, lang = result
-        log.info(f"Transcript OK (yt-dlp) | video_id={video_id} | lang={lang} | chars={len(text)}")
+        ok, reason = is_usable_transcript(text)
+        log.info(f"Transcript OK (yt-dlp) | video_id={video_id} | lang={lang} | chars={len(text)} | quality={reason}")
         return TranscriptResponse(video_id=video_id, url=url, transcript=text, language=lang, source="yt-dlp")
 
-    # 3. Both failed — return gracefully
+    # 3. Optional Whisper fallback
+    if use_whisper:
+        log.info(f"Falling back to Whisper | video_id={video_id}")
+        result = _get_via_whisper(video_id, language if language != "en" else None)
+        if result:
+            text, lang = result
+            ok, reason = is_usable_transcript(text)
+            log.info(f"Transcript OK (whisper) | video_id={video_id} | lang={lang} | chars={len(text)} | quality={reason}")
+            return TranscriptResponse(video_id=video_id, url=url, transcript=text, language=lang, source="whisper")
+
+    # All methods failed
     msg = "No transcript available (API and yt-dlp both failed)"
+    if use_whisper:
+        msg = "No transcript available (API, yt-dlp, and Whisper all failed)"
     log.warning(f"Transcript FAILED | video_id={video_id} | {msg}")
     return TranscriptResponse(video_id=video_id, url=url, transcript=None, error=msg)
 
 
-async def get_transcript(video_id: str, language: str = "en") -> TranscriptResponse:
+async def get_transcript(video_id: str, language: str = "en", use_whisper: bool = False) -> TranscriptResponse:
     """
     Async entry point for transcript retrieval.
-    Tries youtube-transcript-api first, falls back to yt-dlp subtitles.
+    Tries youtube-transcript-api first, falls back to yt-dlp subtitles,
+    and optionally falls back to local Whisper transcription.
     Never raises — returns error field on failure.
     """
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _get_transcript_sync, video_id, language)
+    return await loop.run_in_executor(None, _get_transcript_sync, video_id, language, use_whisper)
+

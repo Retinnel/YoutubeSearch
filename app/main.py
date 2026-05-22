@@ -13,10 +13,11 @@ from fastapi.responses import JSONResponse
 from app.config import settings
 from app.models import (
     SearchShortsRequest, SearchShortsResponse,
+    SearchChannelShortsRequest, SearchChannelShortsResponse,
     GetTranscriptRequest, TranscriptResponse,
     ProcessChannelRequest, ProcessChannelResponse, ShortWithTranscript,
 )
-from app.services.shorts_finder import search_shorts, get_channel_shorts
+from app.services.shorts_finder import search_shorts, get_channel_shorts, search_channel_outliers
 from app.services.transcriber import get_transcript
 from app.utils.logger import setup_logger, get_logger
 
@@ -27,7 +28,7 @@ log = get_logger(__name__)
 app = FastAPI(
     title="YouTube Shorts Finder",
     description="Search and transcribe YouTube Shorts without the YouTube Data API.",
-    version="1.0.0",
+    version="1.1.0",
 )
 
 # ── Auth ───────────────────────────────────────────────────────────────────────
@@ -63,7 +64,10 @@ async def log_requests(request: Request, call_next):
 @app.on_event("startup")
 async def startup_event():
     log.info("Server starting up")
-    log.info(f"Host: {settings.host}:{settings.port} | Log level: {settings.log_level}")
+    log.info(
+        f"Host: {settings.host}:{settings.port} | Log level: {settings.log_level} | "
+        f"Whisper: {'enabled' if settings.whisper_enabled else 'disabled'}"
+    )
 
 
 @app.on_event("shutdown")
@@ -91,11 +95,51 @@ async def search_shorts_endpoint(body: SearchShortsRequest):
     Search YouTube for Shorts matching the query.
 
     Uses yt-dlp internally — no YouTube Data API quota consumed.
-    Returns metadata (video_id, URL, title, channel, duration) for each short found.
+    Returns metadata including outlier_score (views / batch_avg) and engagement_rate.
     """
-    log.info(f"search_shorts | query='{body.query}' | max_results={body.max_results} | min_views={body.min_views}")
-    shorts = await search_shorts(body.query, body.max_results, body.min_views)
+    log.info(
+        f"search_shorts | query='{body.query}' | max_results={body.max_results} | "
+        f"min_views={body.min_views} | min_outlier_score={body.min_outlier_score}"
+    )
+    shorts = await search_shorts(body.query, body.max_results, body.min_views, body.min_outlier_score)
     return SearchShortsResponse(query=body.query, shorts=shorts, total=len(shorts))
+
+
+@app.post(
+    "/api/v1/search_channel_shorts",
+    response_model=SearchChannelShortsResponse,
+    tags=["Shorts"],
+    dependencies=[Depends(verify_api_key)],
+    summary="Find top viral Shorts from a specific channel by outlier score",
+)
+async def search_channel_shorts_endpoint(body: SearchChannelShortsRequest):
+    """
+    Fetch Shorts from a specific YouTube channel and return top outliers.
+
+    Outlier score = views / channel_avg_views (real per-channel average, more accurate
+    than keyword search batch average). No YouTube Data API quota consumed.
+
+    Useful for analyzing curated channels to find their viral content.
+    """
+    log.info(
+        f"search_channel_shorts | channel='{body.channel_url}' | max={body.max_results} | "
+        f"top_n={body.top_n} | min_outlier={body.min_outlier_score} | min_views={body.min_views}"
+    )
+    result = await search_channel_outliers(
+        body.channel_url,
+        max_results=body.max_results,
+        top_n=body.top_n,
+        min_outlier_score=body.min_outlier_score,
+        min_views=body.min_views,
+    )
+    return SearchChannelShortsResponse(
+        channel_url=body.channel_url,
+        channel_title=result["channel_title"],
+        shorts_scanned=result["scanned"],
+        avg_views_channel=result["avg_views"],
+        shorts=result["shorts"],
+        total=len(result["shorts"]),
+    )
 
 
 @app.post(
@@ -110,10 +154,11 @@ async def get_transcript_endpoint(body: GetTranscriptRequest):
     Retrieve the transcript for a YouTube video.
 
     Tries `youtube-transcript-api` first; falls back to yt-dlp auto-subtitles.
+    If `WHISPER_ENABLED=true` in .env, uses Whisper as a last resort.
     Returns `null` transcript (not an error) when no captions are available.
     """
     log.info(f"get_transcript | video_id={body.video_id} | language={body.language}")
-    result = await get_transcript(body.video_id, body.language)
+    result = await get_transcript(body.video_id, body.language, use_whisper=settings.whisper_enabled)
     return result
 
 
@@ -142,7 +187,8 @@ async def process_channel_endpoint(body: ProcessChannelRequest):
     # Fetch all transcripts concurrently
     import asyncio
     transcript_tasks = [
-        get_transcript(s.video_id, body.language) for s in shorts_meta
+        get_transcript(s.video_id, body.language, use_whisper=settings.whisper_enabled)
+        for s in shorts_meta
     ]
     transcripts = await asyncio.gather(*transcript_tasks)
 
@@ -163,3 +209,4 @@ async def process_channel_endpoint(body: ProcessChannelRequest):
         shorts_found=len(results),
         shorts=results,
     )
+

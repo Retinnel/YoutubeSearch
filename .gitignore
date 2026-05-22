@@ -23,3 +23,6 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+
+# Subproject (separate repo, not tracked here)
+subproject/
