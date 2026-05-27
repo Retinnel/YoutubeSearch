@@ -315,7 +315,7 @@ def _get_via_ytdlp(video_id: str, language: str, cookies_file: str = "") -> tupl
     return None
 
 
-def _download_audio(video_id: str, tmp_dir: str) -> str | None:
+def _download_audio(video_id: str, tmp_dir: str, cookies_file: str = "") -> str | None:
     """Download audio from a YouTube Shorts video to tmp_dir. Returns file path or None."""
     url = f"https://www.youtube.com/shorts/{video_id}"
     dl_opts = {
@@ -328,7 +328,15 @@ def _download_audio(video_id: str, tmp_dir: str) -> str | None:
             "preferredcodec": "mp3",
             "preferredquality": "5",
         }],
+        "socket_timeout": 30,
+        "retries": 1,
+        "js_runtimes": ["nodejs"],  # for n-challenge solving
     }
+    if cookies_file and os.path.isfile(cookies_file):
+        # Copy to writable temp path (source may be read-only in Docker)
+        tmp_cookies = os.path.join(tmp_dir, "cookies.txt")
+        shutil.copy2(cookies_file, tmp_cookies)
+        dl_opts["cookiefile"] = tmp_cookies
     try:
         with yt_dlp.YoutubeDL(dl_opts) as ydl:
             ydl.download([url])
@@ -362,7 +370,7 @@ def _get_via_groq(video_id: str, audio_path: str, language: Optional[str] = None
         return None
 
     try:
-        client = Groq(api_key=settings.groq_api_key)
+        client = Groq(api_key=settings.groq_api_key, timeout=90.0)
         transcribe_kwargs: dict = {
             "model": "whisper-large-v3",
             "response_format": "verbose_json",
@@ -432,14 +440,14 @@ def _get_via_local_whisper(video_id: str, audio_path: str, language: Optional[st
         return None
 
 
-def _get_via_whisper(video_id: str, language: Optional[str] = None) -> tuple[str, str] | None:
+def _get_via_whisper(video_id: str, language: Optional[str] = None, cookies_file: str = "") -> tuple[str, str] | None:
     """
     Transcribe YouTube Shorts audio.
     Priority: Groq cloud API (if GROQ_API_KEY set) → local faster-whisper.
     Returns (text, language) or None on failure.
     """
     with tempfile.TemporaryDirectory() as tmp_dir:
-        audio_path = _download_audio(video_id, tmp_dir)
+        audio_path = _download_audio(video_id, tmp_dir, cookies_file=cookies_file)
         if not audio_path:
             log.warning(f"Whisper: audio file not found after download | video_id={video_id}")
             return None
@@ -512,7 +520,7 @@ def _get_transcript_sync(video_id: str, language: str, use_whisper: bool = False
             log.info(f"Force Whisper transcription (skipping YouTube captions) | video_id={video_id}")
         else:
             log.info(f"Falling back to Whisper | video_id={video_id}")
-        result = _get_via_whisper(video_id, language if language != "en" else None)
+        result = _get_via_whisper(video_id, language if language != "en" else None, cookies_file=cookies_file)
         if result:
             text, lang = result
             ok, reason = is_usable_transcript(text)
