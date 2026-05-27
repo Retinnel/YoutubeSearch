@@ -5,7 +5,7 @@ No network required — all I/O is mocked or uses local fixtures.
 import os
 import shutil
 import tempfile
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, mock_open
 
 import pytest
 
@@ -14,6 +14,9 @@ from app.services.transcriber import (
     _parse_vtt,
     is_usable_transcript,
     _get_via_ytdlp,
+    _get_via_groq,
+    _get_via_local_whisper,
+    _get_via_whisper,
 )
 
 
@@ -169,3 +172,97 @@ class TestYtdlpCookiesCopy:
         assert captured_opts["cookiefile"].endswith("cookies.txt")
         # js_runtimes should be set for n-challenge solving
         assert "js_runtimes" in captured_opts
+
+
+# ── _get_via_groq ─────────────────────────────────────────────────────────────
+
+class TestGetViaGroq:
+    def test_returns_none_when_no_api_key(self, tmp_path):
+        audio = tmp_path / "test.mp3"
+        audio.write_bytes(b"fake audio")
+        with patch("app.config.settings") as mock_settings:
+            mock_settings.groq_api_key = ""
+            result = _get_via_groq("vid123", str(audio))
+        assert result is None
+
+    def test_returns_transcript_on_success(self, tmp_path):
+        audio = tmp_path / "test.mp3"
+        audio.write_bytes(b"fake audio")
+
+        mock_response = MagicMock()
+        mock_response.text = "This is a great video about coding."
+        mock_response.language = "en"
+
+        mock_client = MagicMock()
+        mock_client.audio.transcriptions.create.return_value = mock_response
+
+        with patch("app.config.settings") as mock_settings, \
+             patch("groq.Groq", return_value=mock_client):
+            mock_settings.groq_api_key = "fake-key"
+            result = _get_via_groq("vid123", str(audio), language="en")
+
+        assert result is not None
+        text, lang = result
+        assert "coding" in text
+        assert lang == "en"
+
+    def test_returns_none_on_api_error(self, tmp_path):
+        audio = tmp_path / "test.mp3"
+        audio.write_bytes(b"fake audio")
+
+        mock_client = MagicMock()
+        mock_client.audio.transcriptions.create.side_effect = Exception("API error")
+
+        with patch("app.config.settings") as mock_settings, \
+             patch("groq.Groq", return_value=mock_client):
+            mock_settings.groq_api_key = "fake-key"
+            result = _get_via_groq("vid123", str(audio))
+
+        assert result is None
+
+
+# ── _get_via_whisper routing ──────────────────────────────────────────────────
+
+class TestGetViaWhisperRouting:
+    def test_uses_groq_when_key_available(self):
+        """When GROQ_API_KEY is set, Groq should be used (not local Whisper)."""
+        with patch("app.services.transcriber._download_audio", return_value="/tmp/fake.mp3"), \
+             patch("app.services.transcriber._get_via_groq", return_value=("groq text", "en")) as mock_groq, \
+             patch("app.services.transcriber._get_via_local_whisper") as mock_local, \
+             patch("app.config.settings") as mock_settings:
+            mock_settings.groq_api_key = "fake-key"
+            result = _get_via_whisper("vid123")
+
+        assert result == ("groq text", "en")
+        mock_groq.assert_called_once()
+        mock_local.assert_not_called()
+
+    def test_falls_back_to_local_when_groq_fails(self):
+        """If Groq fails, local Whisper should be tried."""
+        with patch("app.services.transcriber._download_audio", return_value="/tmp/fake.mp3"), \
+             patch("app.services.transcriber._get_via_groq", return_value=None), \
+             patch("app.services.transcriber._get_via_local_whisper", return_value=("local text", "en")) as mock_local, \
+             patch("app.config.settings") as mock_settings:
+            mock_settings.groq_api_key = "fake-key"
+            result = _get_via_whisper("vid123")
+
+        assert result == ("local text", "en")
+        mock_local.assert_called_once()
+
+    def test_uses_local_when_no_groq_key(self):
+        """When no GROQ_API_KEY, skip Groq and go straight to local Whisper."""
+        with patch("app.services.transcriber._download_audio", return_value="/tmp/fake.mp3"), \
+             patch("app.services.transcriber._get_via_groq") as mock_groq, \
+             patch("app.services.transcriber._get_via_local_whisper", return_value=("local text", "en")) as mock_local, \
+             patch("app.config.settings") as mock_settings:
+            mock_settings.groq_api_key = ""
+            result = _get_via_whisper("vid123")
+
+        assert result == ("local text", "en")
+        mock_groq.assert_not_called()
+        mock_local.assert_called_once()
+
+    def test_returns_none_when_audio_download_fails(self):
+        with patch("app.services.transcriber._download_audio", return_value=None):
+            result = _get_via_whisper("vid123")
+        assert result is None

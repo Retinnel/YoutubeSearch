@@ -4,8 +4,10 @@ Transcript retrieval service.
 Strategy:
 1. Try youtube-transcript-api (fast, no video download).
 2. Fallback: yt-dlp with --write-auto-sub (slower, more reliable).
-3. Optional fallback: OpenAI Whisper (local audio transcription, off by default).
-   Enable via WHISPER_ENABLED=true in .env. Requires openai-whisper + ffmpeg.
+3. Optional fallback: Whisper transcription (off by default).
+   - If GROQ_API_KEY is set: uses Groq cloud API (whisper-large-v3, free, best quality).
+   - Otherwise: uses local faster-whisper (model size set by WHISPER_MODEL, default: small).
+   Enable via WHISPER_ENABLED=true in .env.
 4. On any failure: return error string, never raise.
 
 Cookies:
@@ -313,82 +315,145 @@ def _get_via_ytdlp(video_id: str, language: str, cookies_file: str = "") -> tupl
     return None
 
 
-def _get_via_whisper(video_id: str, language: Optional[str] = None) -> tuple[str, str] | None:
+def _download_audio(video_id: str, tmp_dir: str) -> str | None:
+    """Download audio from a YouTube Shorts video to tmp_dir. Returns file path or None."""
+    url = f"https://www.youtube.com/shorts/{video_id}"
+    dl_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "format": "worstaudio/worst",
+        "outtmpl": os.path.join(tmp_dir, f"{video_id}.%(ext)s"),
+        "postprocessors": [{
+            "key": "FFmpegExtractAudio",
+            "preferredcodec": "mp3",
+            "preferredquality": "5",
+        }],
+    }
+    try:
+        with yt_dlp.YoutubeDL(dl_opts) as ydl:
+            ydl.download([url])
+    except Exception as exc:
+        log.warning(f"Whisper: audio download failed | video_id={video_id} | {exc}")
+        return None
+
+    # Find the actual output file (yt-dlp may change extension)
+    for ext in [".mp3", ".m4a", ".wav", ".opus", ".webm", ".ogg"]:
+        p = os.path.join(tmp_dir, f"{video_id}{ext}")
+        if os.path.exists(p):
+            return p
+    candidates = [f for f in _glob.glob(os.path.join(tmp_dir, f"{video_id}.*"))
+                  if not f.endswith(".txt")]
+    return candidates[0] if candidates else None
+
+
+def _get_via_groq(video_id: str, audio_path: str, language: Optional[str] = None) -> tuple[str, str] | None:
     """
-    Optional 3rd fallback: download audio and transcribe with faster-whisper locally.
-    Requires: pip install faster-whisper + ffmpeg in PATH.
-    Much slower than subtitle-based methods — use only as last resort or when forced.
+    Transcribe audio using Groq cloud API (whisper-large-v3).
+    Free tier: 7200 min/day. Best quality option.
+    Returns (text, language) or None on failure.
+    """
+    from app.config import settings
+    if not settings.groq_api_key:
+        return None
+    try:
+        from groq import Groq
+    except ImportError:
+        log.warning("groq package not installed (pip install groq). Skipping Groq transcription.")
+        return None
+
+    try:
+        client = Groq(api_key=settings.groq_api_key)
+        transcribe_kwargs: dict = {
+            "model": "whisper-large-v3",
+            "response_format": "verbose_json",
+        }
+        if language:
+            transcribe_kwargs["language"] = language
+
+        log.info(f"Groq Whisper: transcribing | video_id={video_id} | model=whisper-large-v3")
+        with open(audio_path, "rb") as f:
+            response = client.audio.transcriptions.create(
+                file=(os.path.basename(audio_path), f, "audio/mpeg"),
+                **transcribe_kwargs,
+            )
+        text = response.text.strip() if hasattr(response, "text") else ""
+        detected_lang = getattr(response, "language", None) or language or "unknown"
+        if text:
+            log.info(f"Groq Whisper: OK | video_id={video_id} | lang={detected_lang} | chars={len(text)}")
+            return text, detected_lang
+        log.warning(f"Groq Whisper: empty response | video_id={video_id}")
+        return None
+    except Exception as exc:
+        log.warning(f"Groq Whisper: error | video_id={video_id} | {exc}")
+        return None
+
+
+def _get_via_local_whisper(video_id: str, audio_path: str, language: Optional[str] = None) -> tuple[str, str] | None:
+    """
+    Transcribe audio using local faster-whisper model.
+    Model size controlled by WHISPER_MODEL env var (default: small).
+    Returns (text, language) or None on failure.
     """
     try:
         from faster_whisper import WhisperModel
     except ImportError:
-        log.warning("faster-whisper not installed (pip install faster-whisper). Skipping Whisper fallback.")
+        log.warning("faster-whisper not installed. Skipping local Whisper transcription.")
         return None
 
-    url = f"https://www.youtube.com/shorts/{video_id}"
+    from app.config import settings
+    model_name = settings.whisper_model or "small"
 
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        # Download audio only
-        dl_opts = {
-            "quiet": True,
-            "no_warnings": True,
-            "format": "worstaudio/worst",
-            "outtmpl": os.path.join(tmp_dir, f"{video_id}.%(ext)s"),
-            "postprocessors": [{
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "mp3",
-                "preferredquality": "5",
-            }],
-        }
-        try:
-            with yt_dlp.YoutubeDL(dl_opts) as ydl:
-                ydl.download([url])
-        except Exception as exc:
-            log.warning(f"Whisper: audio download failed | video_id={video_id} | {exc}")
+    try:
+        model = None
+        for compute_type in ("int8", "float32"):
+            try:
+                model = WhisperModel(model_name, device="cpu", compute_type=compute_type)
+                log.debug(f"Whisper: loaded model={model_name} compute_type={compute_type}")
+                break
+            except Exception as load_exc:
+                log.debug(f"Whisper: compute_type={compute_type} failed ({load_exc}), trying next")
+
+        if model is None:
+            log.warning(f"Whisper: could not load model={model_name} | video_id={video_id}")
             return None
 
-        # Find the actual output file (yt-dlp may change extension)
-        found_path = None
-        for ext in [".mp3", ".m4a", ".wav", ".opus", ".webm", ".ogg"]:
-            p = os.path.join(tmp_dir, f"{video_id}{ext}")
-            if os.path.exists(p):
-                found_path = p
-                break
-        if not found_path:
-            candidates = [f for f in _glob.glob(os.path.join(tmp_dir, f"{video_id}.*"))
-                          if not f.endswith(".txt")]
-            if candidates:
-                found_path = candidates[0]
-        if not found_path:
+        log.info(f"Whisper: transcribing | video_id={video_id} | model={model_name} | file={audio_path}")
+        transcribe_opts: dict = {"beam_size": 5}
+        if language:
+            transcribe_opts["language"] = language
+        segments, info = model.transcribe(audio_path, **transcribe_opts)
+        text = " ".join(seg.text.strip() for seg in segments if seg.text.strip())
+        if text:
+            detected_lang = info.language or language or "unknown"
+            return text, detected_lang
+        return None
+    except Exception as exc:
+        log.warning(f"Whisper local transcription error | video_id={video_id} | {exc}")
+        return None
+
+
+def _get_via_whisper(video_id: str, language: Optional[str] = None) -> tuple[str, str] | None:
+    """
+    Transcribe YouTube Shorts audio.
+    Priority: Groq cloud API (if GROQ_API_KEY set) → local faster-whisper.
+    Returns (text, language) or None on failure.
+    """
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        audio_path = _download_audio(video_id, tmp_dir)
+        if not audio_path:
             log.warning(f"Whisper: audio file not found after download | video_id={video_id}")
             return None
 
-        try:
-            log.info(f"Whisper: transcribing | video_id={video_id} | model=base | file={found_path}")
-            # Try int8 first (fastest), fall back to float32 for older CPUs without AVX2
-            model = None
-            for compute_type in ("int8", "float32"):
-                try:
-                    model = WhisperModel("base", device="cpu", compute_type=compute_type)
-                    log.debug(f"Whisper: loaded model | compute_type={compute_type}")
-                    break
-                except Exception as load_exc:
-                    log.debug(f"Whisper: compute_type={compute_type} failed ({load_exc}), trying next")
-            if model is None:
-                log.warning(f"Whisper: could not load model | video_id={video_id}")
-                return None
-            transcribe_opts: dict = {"beam_size": 5}
-            if language:
-                transcribe_opts["language"] = language
-            segments, info = model.transcribe(found_path, **transcribe_opts)
-            text = " ".join(seg.text.strip() for seg in segments if seg.text.strip())
-            if text:
-                detected_lang = info.language or language or "unknown"
-                return text, detected_lang
-        except Exception as exc:
-            log.warning(f"Whisper transcription error | video_id={video_id} | {exc}")
+        # Try Groq first (best quality, free)
+        from app.config import settings
+        if settings.groq_api_key:
+            result = _get_via_groq(video_id, audio_path, language)
+            if result:
+                return result
+            log.info(f"Groq failed, falling back to local Whisper | video_id={video_id}")
 
-    return None
+        # Local faster-whisper fallback
+        return _get_via_local_whisper(video_id, audio_path, language)
 
 
 def _parse_vtt(path: str) -> str:

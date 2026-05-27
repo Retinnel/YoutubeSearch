@@ -11,8 +11,16 @@ class Settings(BaseSettings):
     # Export via browser extension, e.g. "Get cookies.txt LOCALLY" for Chrome.
     cookies_file: str = ""
     # Set to true to enable Whisper as 3rd transcription fallback.
-    # Requires: pip install openai-whisper + ffmpeg in PATH. Much slower.
+    # Requires: pip install faster-whisper + ffmpeg in PATH. Much slower.
     whisper_enabled: bool = False
+    # Groq API key for cloud Whisper transcription (whisper-large-v3).
+    # Free tier: 7200 min/day. Much better quality than local models.
+    # Get key at: https://console.groq.com/keys
+    # If set, Groq is used instead of local faster-whisper when force_whisper=True.
+    groq_api_key: str = ""
+    # Local Whisper model size when Groq is not available.
+    # Options: tiny, base, small, medium, large-v3 (larger = better quality, more RAM)
+    whisper_model: str = "small"
     # ngrok settings (used in docker-compose, ignored here)
     ngrok_domain: str = ""
     ngrok_authtoken: str = ""
