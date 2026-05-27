@@ -15,6 +15,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Pre-download Whisper 'base' model so first-request doesn't timeout.
+# The model (~150MB) is baked into the image layer.
+RUN python -c "\
+from faster_whisper import WhisperModel; \
+print('Downloading Whisper base model...'); \
+WhisperModel('base', device='cpu', compute_type='float32'); \
+print('Whisper model cached.')"
+
 COPY app/ ./app/
 
 EXPOSE 8000

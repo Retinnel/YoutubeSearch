@@ -364,10 +364,20 @@ def _get_via_whisper(video_id: str, language: Optional[str] = None) -> tuple[str
             return None
 
         try:
-            log.info(f"Whisper: transcribing | video_id={video_id} | model=base")
-            # device=cpu, int8 quantisation for minimal RAM usage
-            model = WhisperModel("base", device="cpu", compute_type="int8")
-            transcribe_opts: dict = {}
+            log.info(f"Whisper: transcribing | video_id={video_id} | model=base | file={found_path}")
+            # Try int8 first (fastest), fall back to float32 for older CPUs without AVX2
+            model = None
+            for compute_type in ("int8", "float32"):
+                try:
+                    model = WhisperModel("base", device="cpu", compute_type=compute_type)
+                    log.debug(f"Whisper: loaded model | compute_type={compute_type}")
+                    break
+                except Exception as load_exc:
+                    log.debug(f"Whisper: compute_type={compute_type} failed ({load_exc}), trying next")
+            if model is None:
+                log.warning(f"Whisper: could not load model | video_id={video_id}")
+                return None
+            transcribe_opts: dict = {"beam_size": 5}
             if language:
                 transcribe_opts["language"] = language
             segments, info = model.transcribe(found_path, **transcribe_opts)
