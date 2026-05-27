@@ -411,29 +411,33 @@ def _parse_vtt(path: str) -> str:
     return " ".join(lines)
 
 
-def _get_transcript_sync(video_id: str, language: str, use_whisper: bool = False, cookies_file: str = "") -> TranscriptResponse:
+def _get_transcript_sync(video_id: str, language: str, use_whisper: bool = False, force_whisper: bool = False, cookies_file: str = "") -> TranscriptResponse:
     url = f"https://www.youtube.com/shorts/{video_id}"
 
-    # 1. Fast path via youtube-transcript-api
-    result = _get_via_api(video_id, language, cookies_file)
-    if result:
-        text, lang = result
-        ok, reason = is_usable_transcript(text)
-        log.info(f"Transcript OK (api) | video_id={video_id} | lang={lang} | chars={len(text)} | quality={reason}")
-        return TranscriptResponse(video_id=video_id, url=url, transcript=text, language=lang, source="api")
+    if not force_whisper:
+        # 1. Fast path via youtube-transcript-api
+        result = _get_via_api(video_id, language, cookies_file)
+        if result:
+            text, lang = result
+            ok, reason = is_usable_transcript(text)
+            log.info(f"Transcript OK (api) | video_id={video_id} | lang={lang} | chars={len(text)} | quality={reason}")
+            return TranscriptResponse(video_id=video_id, url=url, transcript=text, language=lang, source="api")
 
-    # 2. Fallback: yt-dlp subtitles
-    log.debug(f"Falling back to yt-dlp subtitles | video_id={video_id}")
-    result = _get_via_ytdlp(video_id, language, cookies_file)
-    if result:
-        text, lang = result
-        ok, reason = is_usable_transcript(text)
-        log.info(f"Transcript OK (yt-dlp) | video_id={video_id} | lang={lang} | chars={len(text)} | quality={reason}")
-        return TranscriptResponse(video_id=video_id, url=url, transcript=text, language=lang, source="yt-dlp")
+        # 2. Fallback: yt-dlp subtitles
+        log.debug(f"Falling back to yt-dlp subtitles | video_id={video_id}")
+        result = _get_via_ytdlp(video_id, language, cookies_file)
+        if result:
+            text, lang = result
+            ok, reason = is_usable_transcript(text)
+            log.info(f"Transcript OK (yt-dlp) | video_id={video_id} | lang={lang} | chars={len(text)} | quality={reason}")
+            return TranscriptResponse(video_id=video_id, url=url, transcript=text, language=lang, source="yt-dlp")
 
-    # 3. Optional Whisper fallback
-    if use_whisper:
-        log.info(f"Falling back to Whisper | video_id={video_id}")
+    # 3. Whisper: forced (skip YouTube captions) or fallback
+    if use_whisper or force_whisper:
+        if force_whisper:
+            log.info(f"Force Whisper transcription (skipping YouTube captions) | video_id={video_id}")
+        else:
+            log.info(f"Falling back to Whisper | video_id={video_id}")
         result = _get_via_whisper(video_id, language if language != "en" else None)
         if result:
             text, lang = result
@@ -442,23 +446,27 @@ def _get_transcript_sync(video_id: str, language: str, use_whisper: bool = False
             return TranscriptResponse(video_id=video_id, url=url, transcript=text, language=lang, source="whisper")
 
     # All methods failed
-    msg = "No transcript available (API and yt-dlp both failed)"
-    if use_whisper:
+    if force_whisper:
+        msg = "No transcript available (Whisper failed — check WHISPER_ENABLED and openai-whisper installation)"
+    elif use_whisper:
         msg = "No transcript available (API, yt-dlp, and Whisper all failed)"
+    else:
+        msg = "No transcript available (API and yt-dlp both failed)"
     log.warning(f"Transcript FAILED | video_id={video_id} | {msg}")
     return TranscriptResponse(video_id=video_id, url=url, transcript=None, error=msg)
 
 
-async def get_transcript(video_id: str, language: str = "en", use_whisper: bool = False, cookies_file: str = "") -> TranscriptResponse:
+async def get_transcript(video_id: str, language: str = "en", use_whisper: bool = False, force_whisper: bool = False, cookies_file: str = "") -> TranscriptResponse:
     """
     Async entry point for transcript retrieval.
     Tries youtube-transcript-api first, falls back to yt-dlp subtitles,
     and optionally falls back to local Whisper transcription.
+    If force_whisper=True, skips YouTube captions and uses Whisper directly.
     Never raises — returns error field on failure.
     """
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(
-        None, _get_transcript_sync, video_id, language, use_whisper, cookies_file
+        None, _get_transcript_sync, video_id, language, use_whisper, force_whisper, cookies_file
     )
 
 

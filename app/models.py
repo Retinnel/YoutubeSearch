@@ -56,6 +56,14 @@ class SearchChannelShortsResponse(BaseModel):
 class GetTranscriptRequest(BaseModel):
     video_id: str = Field(..., description="YouTube video ID (e.g. dQw4w9WgXcQ)")
     language: str = Field("en", description="Preferred transcript language code")
+    force_whisper: bool = Field(
+        False,
+        description=(
+            "Skip YouTube captions entirely and use Whisper audio transcription. "
+            "Produces higher-quality results but is much slower. "
+            "Requires WHISPER_ENABLED=true and openai-whisper installed."
+        ),
+    )
 
 
 class TranscriptResponse(BaseModel):
@@ -63,7 +71,7 @@ class TranscriptResponse(BaseModel):
     url: str
     transcript: Optional[str] = None
     language: Optional[str] = None
-    source: Optional[str] = None  # "api" | "yt-dlp" | None
+    source: Optional[str] = None  # "api" | "yt-dlp" | "whisper" | None
     error: Optional[str] = None
 
 

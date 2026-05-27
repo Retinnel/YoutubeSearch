@@ -97,6 +97,26 @@ class TestGetTranscriptEndpoint:
         data = r.json()
         assert data["transcript"] is None
 
+    def test_force_whisper_param_is_accepted(self, client):
+        """force_whisper=true should be accepted and passed to get_transcript."""
+        mock_result = {
+            "video_id": "abc123",
+            "url": "https://youtube.com/shorts/abc123",
+            "transcript": "Whisper transcription text",
+            "language": "en",
+            "source": "whisper",
+        }
+        with patch("app.main.get_transcript", return_value=mock_result) as mock_t:
+            r = client.post(
+                "/api/v1/get_transcript",
+                json={"video_id": "abc123", "force_whisper": True},
+                headers=HEADERS,
+            )
+        assert r.status_code == 200
+        # Verify force_whisper=True was passed to the service
+        _, kwargs = mock_t.call_args
+        assert kwargs.get("force_whisper") is True
+
 
 class TestSearchShortsEndpoint:
     def test_success_response_shape(self, client):

@@ -157,8 +157,14 @@ async def get_transcript_endpoint(body: GetTranscriptRequest):
     If `WHISPER_ENABLED=true` in .env, uses Whisper as a last resort.
     Returns `null` transcript (not an error) when no captions are available.
     """
-    log.info(f"get_transcript | video_id={body.video_id} | language={body.language}")
-    result = await get_transcript(body.video_id, body.language, use_whisper=settings.whisper_enabled, cookies_file=settings.cookies_file)
+    log.info(f"get_transcript | video_id={body.video_id} | language={body.language} | force_whisper={body.force_whisper}")
+    result = await get_transcript(
+        body.video_id,
+        body.language,
+        use_whisper=settings.whisper_enabled,
+        force_whisper=body.force_whisper,
+        cookies_file=settings.cookies_file,
+    )
     return result
 
 

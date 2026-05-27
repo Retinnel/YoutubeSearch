@@ -41,6 +41,14 @@ class TestGetTranscriptRequest:
         r = GetTranscriptRequest(video_id="abc123", language="ru")
         assert r.language == "ru"
 
+    def test_force_whisper_defaults_false(self):
+        r = GetTranscriptRequest(video_id="abc123")
+        assert r.force_whisper is False
+
+    def test_force_whisper_can_be_set(self):
+        r = GetTranscriptRequest(video_id="abc123", force_whisper=True)
+        assert r.force_whisper is True
+
 
 class TestShortMeta:
     def test_optional_fields_default_none(self):
