@@ -315,27 +315,25 @@ def _get_via_ytdlp(video_id: str, language: str, cookies_file: str = "") -> tupl
 
 def _get_via_whisper(video_id: str, language: Optional[str] = None) -> tuple[str, str] | None:
     """
-    Optional 3rd fallback: download audio and transcribe with OpenAI Whisper locally.
-    Requires: pip install openai-whisper + ffmpeg in PATH.
-    Much slower than subtitle-based methods — use only as last resort.
+    Optional 3rd fallback: download audio and transcribe with faster-whisper locally.
+    Requires: pip install faster-whisper + ffmpeg in PATH.
+    Much slower than subtitle-based methods — use only as last resort or when forced.
     """
     try:
-        import whisper
+        from faster_whisper import WhisperModel
     except ImportError:
-        log.warning("Whisper not installed (pip install openai-whisper). Skipping Whisper fallback.")
+        log.warning("faster-whisper not installed (pip install faster-whisper). Skipping Whisper fallback.")
         return None
 
     url = f"https://www.youtube.com/shorts/{video_id}"
 
     with tempfile.TemporaryDirectory() as tmp_dir:
-        audio_path = os.path.join(tmp_dir, f"{video_id}.mp3")
-
         # Download audio only
         dl_opts = {
             "quiet": True,
             "no_warnings": True,
             "format": "worstaudio/worst",
-            "outtmpl": audio_path,
+            "outtmpl": os.path.join(tmp_dir, f"{video_id}.%(ext)s"),
             "postprocessors": [{
                 "key": "FFmpegExtractAudio",
                 "preferredcodec": "mp3",
@@ -349,32 +347,33 @@ def _get_via_whisper(video_id: str, language: Optional[str] = None) -> tuple[str
             log.warning(f"Whisper: audio download failed | video_id={video_id} | {exc}")
             return None
 
-        # Find the actual output file (yt-dlp may append extension)
+        # Find the actual output file (yt-dlp may change extension)
         found_path = None
-        for candidate in [audio_path, audio_path + ".mp3"]:
-            if os.path.exists(candidate):
-                found_path = candidate
+        for ext in [".mp3", ".m4a", ".wav", ".opus", ".webm", ".ogg"]:
+            p = os.path.join(tmp_dir, f"{video_id}{ext}")
+            if os.path.exists(p):
+                found_path = p
                 break
         if not found_path:
-            for ext in [".mp3", ".m4a", ".wav", ".opus", ".webm"]:
-                p = os.path.splitext(audio_path)[0] + ext
-                if os.path.exists(p):
-                    found_path = p
-                    break
+            candidates = [f for f in _glob.glob(os.path.join(tmp_dir, f"{video_id}.*"))
+                          if not f.endswith(".txt")]
+            if candidates:
+                found_path = candidates[0]
         if not found_path:
             log.warning(f"Whisper: audio file not found after download | video_id={video_id}")
             return None
 
         try:
             log.info(f"Whisper: transcribing | video_id={video_id} | model=base")
-            model = whisper.load_model("base")
-            opts_w = {"fp16": False}
+            # device=cpu, int8 quantisation for minimal RAM usage
+            model = WhisperModel("base", device="cpu", compute_type="int8")
+            transcribe_opts: dict = {}
             if language:
-                opts_w["language"] = language
-            result = model.transcribe(found_path, **opts_w)
-            text = result.get("text", "").strip()
+                transcribe_opts["language"] = language
+            segments, info = model.transcribe(found_path, **transcribe_opts)
+            text = " ".join(seg.text.strip() for seg in segments if seg.text.strip())
             if text:
-                detected_lang = result.get("language") or language or "unknown"
+                detected_lang = info.language or language or "unknown"
                 return text, detected_lang
         except Exception as exc:
             log.warning(f"Whisper transcription error | video_id={video_id} | {exc}")

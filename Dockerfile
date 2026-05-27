@@ -5,9 +5,11 @@ WORKDIR /app
 # Install system deps:
 # - ffmpeg: needed for subtitle extraction and Whisper audio
 # - nodejs: needed for yt-dlp to solve YouTube's n-challenge (otherwise many formats are missing)
+# - libgomp1: required by CTranslate2 (faster-whisper's inference backend)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     nodejs \
+    libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
