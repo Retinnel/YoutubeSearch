@@ -562,18 +562,6 @@ def _get_transcript_sync(video_id: str, language: str, use_whisper: bool = False
     return TranscriptResponse(video_id=video_id, url=url, transcript=None, error=msg)
 
 
-#async def get_transcript(video_id: str, language: str = "en", use_whisper: bool = False, force_whisper: bool = False, cookies_file: str = "") -> TranscriptResponse:
-    """
-    Async entry point for transcript retrieval.
-    Tries youtube-transcript-api first, falls back to yt-dlp subtitles,
-    and optionally falls back to local Whisper transcription.
-    If force_whisper=True, skips YouTube captions and uses Whisper directly.
-    Never raises — returns error field on failure.
-    """
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(
-        None, _get_transcript_sync, video_id, language, use_whisper, force_whisper, cookies_file
-    )
 
 async def get_transcript(video_id: str, language: str = "en", use_whisper: bool = False, force_whisper: bool = False, cookies_file: str = "") -> TranscriptResponse:
     """
