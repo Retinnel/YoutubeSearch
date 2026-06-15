@@ -326,12 +326,12 @@ def _get_via_ytdlp(video_id: str, language: str, cookies_file: str = "") -> tupl
 
 
 def _download_audio(video_id: str, tmp_dir: str, cookies_file: str = "") -> str | None:
-    """Download audio from a YouTube Shorts video to tmp_dir. Returns file path or None."""
+    """Download audio from a YouTube video to tmp_dir. Tries multiple formats and player clients. Returns file path or None."""
     url = f"https://www.youtube.com/watch?v={video_id}"
-    dl_opts = {
+
+    base_opts = {
         "quiet": True,
         "no_warnings": True,
-        "format": "bestaudio/best",
         "outtmpl": os.path.join(tmp_dir, f"{video_id}.%(ext)s"),
         "postprocessors": [{
             "key": "FFmpegExtractAudio",
@@ -342,26 +342,46 @@ def _download_audio(video_id: str, tmp_dir: str, cookies_file: str = "") -> str 
         "retries": 1,
         "js_runtimes": {"node": {}},  # for n-challenge solving
     }
-    if cookies_file and os.path.isfile(cookies_file):
-        # Copy to writable temp path (source may be read-only in Docker)
-        tmp_cookies = os.path.join(tmp_dir, "cookies.txt")
-        shutil.copy2(cookies_file, tmp_cookies)
-        dl_opts["cookiefile"] = tmp_cookies
-    try:
-        with yt_dlp.YoutubeDL(dl_opts) as ydl:
-            ydl.download([url])
-    except Exception as exc:
-        log.warning(f"Whisper: audio download failed | video_id={video_id} | {exc}")
-        return None
 
-    # Find the actual output file (yt-dlp may change extension)
-    for ext in [".mp3", ".m4a", ".wav", ".opus", ".webm", ".ogg"]:
-        p = os.path.join(tmp_dir, f"{video_id}{ext}")
-        if os.path.exists(p):
-            return p
-    candidates = [f for f in _glob.glob(os.path.join(tmp_dir, f"{video_id}.*"))
-                  if not f.endswith(".txt")]
-    return candidates[0] if candidates else None
+    player_clients = [None, "web", "android", "tv"]
+    formats_to_try = ["bestaudio/best", "bestaudio", "best"]
+
+    for fmt in formats_to_try:
+        for client in player_clients:
+            opts = dict(base_opts)
+            opts["format"] = fmt
+            if client:
+                opts["player_client"] = client
+
+            # Copy cookies into writable tmp path for this attempt
+            if cookies_file and os.path.isfile(cookies_file):
+                tmp_cookies = os.path.join(tmp_dir, "cookies.txt")
+                try:
+                    shutil.copy2(cookies_file, tmp_cookies)
+                    opts["cookiefile"] = tmp_cookies
+                except Exception as copy_exc:
+                    log.debug(f"Failed to copy cookies file to tmp: {copy_exc}")
+
+            try:
+                log.debug(f"yt-dlp download attempt | video_id={video_id} | format={fmt} | client={client}")
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    ydl.download([url])
+            except Exception as exc:
+                log.warning(f"yt-dlp download attempt failed | video_id={video_id} | format={fmt} | client={client} | {exc}")
+                # Try next client/format
+                continue
+
+            # Find the actual output file (yt-dlp may change extension)
+            for ext in [".mp3", ".m4a", ".wav", ".opus", ".webm", ".ogg", ".mp4", ".mkv"]:
+                p = os.path.join(tmp_dir, f"{video_id}{ext}")
+                if os.path.exists(p):
+                    return p
+            candidates = [f for f in _glob.glob(os.path.join(tmp_dir, f"{video_id}.*")) if not f.endswith(".txt")]
+            if candidates:
+                return candidates[0]
+
+    log.debug(f"yt-dlp: all download attempts failed for video_id={video_id}")
+    return None
 
 
 def _get_via_groq(video_id: str, audio_path: str, language: Optional[str] = None) -> tuple[str, str] | None:
