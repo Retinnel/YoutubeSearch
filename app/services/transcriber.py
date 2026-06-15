@@ -327,7 +327,7 @@ def _get_via_ytdlp(video_id: str, language: str, cookies_file: str = "") -> tupl
 
 def _download_audio(video_id: str, tmp_dir: str, cookies_file: str = "") -> str | None:
     """Download audio from a YouTube Shorts video to tmp_dir. Returns file path or None."""
-    url = f"https://www.youtube.com/shorts/{video_id}"
+    url = f"https://www.youtube.com/watch?v={video_id}"
     dl_opts = {
         "quiet": True,
         "no_warnings": True,
