@@ -33,6 +33,7 @@ from typing import Optional
 
 import yt_dlp
 from requests import Session
+import httpx
 from youtube_transcript_api import YouTubeTranscriptApi
 
 from app.models import TranscriptResponse
@@ -325,12 +326,12 @@ def _get_via_ytdlp(video_id: str, language: str, cookies_file: str = "") -> tupl
 
 
 def _download_audio(video_id: str, tmp_dir: str, cookies_file: str = "") -> str | None:
-    """Download audio from a YouTube Shorts video to tmp_dir. Returns file path or None."""
-    url = f"https://www.youtube.com/shorts/{video_id}"
-    dl_opts = {
+    """Download audio from a YouTube video to tmp_dir. Tries multiple formats and player clients. Returns file path or None."""
+    url = f"https://www.youtube.com/watch?v={video_id}"
+
+    base_opts = {
         "quiet": True,
         "no_warnings": True,
-        "format": "worstaudio/worst",
         "outtmpl": os.path.join(tmp_dir, f"{video_id}.%(ext)s"),
         "postprocessors": [{
             "key": "FFmpegExtractAudio",
@@ -339,28 +340,48 @@ def _download_audio(video_id: str, tmp_dir: str, cookies_file: str = "") -> str 
         }],
         "socket_timeout": 30,
         "retries": 1,
-        "js_runtimes": ["nodejs"],  # for n-challenge solving
+        "js_runtimes": {"node": {}},  # for n-challenge solving
     }
-    if cookies_file and os.path.isfile(cookies_file):
-        # Copy to writable temp path (source may be read-only in Docker)
-        tmp_cookies = os.path.join(tmp_dir, "cookies.txt")
-        shutil.copy2(cookies_file, tmp_cookies)
-        dl_opts["cookiefile"] = tmp_cookies
-    try:
-        with yt_dlp.YoutubeDL(dl_opts) as ydl:
-            ydl.download([url])
-    except Exception as exc:
-        log.warning(f"Whisper: audio download failed | video_id={video_id} | {exc}")
-        return None
 
-    # Find the actual output file (yt-dlp may change extension)
-    for ext in [".mp3", ".m4a", ".wav", ".opus", ".webm", ".ogg"]:
-        p = os.path.join(tmp_dir, f"{video_id}{ext}")
-        if os.path.exists(p):
-            return p
-    candidates = [f for f in _glob.glob(os.path.join(tmp_dir, f"{video_id}.*"))
-                  if not f.endswith(".txt")]
-    return candidates[0] if candidates else None
+    player_clients = [None, "web", "android", "tv"]
+    formats_to_try = ["bestaudio/best", "bestaudio", "best"]
+
+    for fmt in formats_to_try:
+        for client in player_clients:
+            opts = dict(base_opts)
+            opts["format"] = fmt
+            if client:
+                opts["player_client"] = client
+
+            # Copy cookies into writable tmp path for this attempt
+            if cookies_file and os.path.isfile(cookies_file):
+                tmp_cookies = os.path.join(tmp_dir, "cookies.txt")
+                try:
+                    shutil.copy2(cookies_file, tmp_cookies)
+                    opts["cookiefile"] = tmp_cookies
+                except Exception as copy_exc:
+                    log.debug(f"Failed to copy cookies file to tmp: {copy_exc}")
+
+            try:
+                log.debug(f"yt-dlp download attempt | video_id={video_id} | format={fmt} | client={client}")
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    ydl.download([url])
+            except Exception as exc:
+                log.warning(f"yt-dlp download attempt failed | video_id={video_id} | format={fmt} | client={client} | {exc}")
+                # Try next client/format
+                continue
+
+            # Find the actual output file (yt-dlp may change extension)
+            for ext in [".mp3", ".m4a", ".wav", ".opus", ".webm", ".ogg", ".mp4", ".mkv"]:
+                p = os.path.join(tmp_dir, f"{video_id}{ext}")
+                if os.path.exists(p):
+                    return p
+            candidates = [f for f in _glob.glob(os.path.join(tmp_dir, f"{video_id}.*")) if not f.endswith(".txt")]
+            if candidates:
+                return candidates[0]
+
+    log.debug(f"yt-dlp: all download attempts failed for video_id={video_id}")
+    return None
 
 
 def _get_via_groq(video_id: str, audio_path: str, language: Optional[str] = None) -> tuple[str, str] | None:
@@ -403,6 +424,53 @@ def _get_via_groq(video_id: str, audio_path: str, language: Optional[str] = None
     except Exception as exc:
         log.warning(f"Groq Whisper: error | video_id={video_id} | {exc}")
         return None
+
+
+def _get_via_openai(video_id: str, audio_path: str, language: Optional[str] = None) -> tuple[str, str] | None:
+    """
+    Transcribe audio using OpenAI Whisper API (whisper-1).
+    Returns (text, language) or None on failure.
+    """
+    from app.config import settings
+    if not getattr(settings, "openai_key", ""):
+        return None
+    try:
+        headers = {"Authorization": f"Bearer {settings.openai_key}"}
+        data = {"model": "whisper-1"}
+        if language:
+            data["language"] = language
+        with open(audio_path, "rb") as f:
+            files = {"file": (os.path.basename(audio_path), f, "application/octet-stream")}
+            with httpx.Client(timeout=120.0) as client:
+                resp = client.post("https://api.openai.com/v1/audio/transcriptions", headers=headers, data=data, files=files)
+        if resp.status_code == 200:
+            try:
+                j = resp.json()
+                text = j.get("text") if isinstance(j, dict) else str(resp.text)
+            except Exception:
+                text = resp.text or ""
+            if text:
+                detected_lang = language or "unknown"
+                log.info(f"OpenAI Whisper: OK | video_id={video_id} | chars={len(text)}")
+                return text, detected_lang
+            log.warning(f"OpenAI Whisper: empty response | video_id={video_id}")
+            return None
+        else:
+            log.warning(f"OpenAI Whisper: error | video_id={video_id} | status={resp.status_code} | {resp.text}")
+            return None
+    except Exception as exc:
+        log.warning(f"OpenAI Whisper: exception | video_id={video_id} | {exc}")
+        return None
+
+
+def _get_via_openai_full(video_id: str, language: Optional[str] = None, cookies_file: str = "") -> tuple[str, str] | None:
+    """Download audio and transcribe via OpenAI Whisper API."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        audio_path = _download_audio(video_id, tmp_dir, cookies_file=cookies_file)
+        if not audio_path:
+            log.warning(f"OpenAI Whisper: audio file not found after download | video_id={video_id}")
+            return None
+        return _get_via_openai(video_id, audio_path, language)
 
 
 def _get_via_local_whisper(video_id: str, audio_path: str, language: Optional[str] = None) -> tuple[str, str] | None:
@@ -467,7 +535,7 @@ def _get_via_local_whisper(video_id: str, audio_path: str, language: Optional[st
 def _get_via_whisper(video_id: str, language: Optional[str] = None, cookies_file: str = "") -> tuple[str, str] | None:
     """
     Transcribe YouTube Shorts audio.
-    Priority: Groq cloud API (if GROQ_API_KEY set) → local faster-whisper.
+    Priority: OpenAI (if OPENAI_KEY set and PREFER_OPENAI=true) → Groq cloud API (if GROQ_API_KEY set) → local faster-whisper.
     Returns (text, language) or None on failure.
     """
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -476,15 +544,30 @@ def _get_via_whisper(video_id: str, language: Optional[str] = None, cookies_file
             log.warning(f"Whisper: audio file not found after download | video_id={video_id}")
             return None
 
-        # Try Groq first (best quality, free)
         from app.config import settings
+
+        # 1) If OpenAI is configured and preferred, try it first
+        if getattr(settings, "openai_key", "") and getattr(settings, "openai_prefer", False):
+            result = _get_via_openai(video_id, audio_path, language)
+            if result:
+                return result
+            log.info(f"OpenAI Whisper failed, falling back to Groq/local Whisper | video_id={video_id}")
+
+        # 2) Try Groq (best quality cloud option) if configured
         if settings.groq_api_key:
             result = _get_via_groq(video_id, audio_path, language)
             if result:
                 return result
             log.info(f"Groq failed, falling back to local Whisper | video_id={video_id}")
 
-        # Local faster-whisper fallback
+        # 3) If OpenAI is configured but not preferred, try it now
+        if getattr(settings, "openai_key", "") and not getattr(settings, "openai_prefer", False):
+            result = _get_via_openai(video_id, audio_path, language)
+            if result:
+                return result
+            log.info(f"OpenAI Whisper failed, falling back to local Whisper | video_id={video_id}")
+
+        # 4) Local faster-whisper fallback
         return _get_via_local_whisper(video_id, audio_path, language)
 
 
@@ -517,8 +600,44 @@ def _parse_vtt(path: str) -> str:
     return " ".join(lines)
 
 
+from datetime import datetime
+
+def _save_transcript_to_disk(tr: TranscriptResponse) -> str | None:
+    """Persist transcript response to disk (JSON). Returns path or None."""
+    try:
+        from app.config import settings
+        dirpath = getattr(settings, "transcripts_dir", "/app/logs/transcripts")
+        os.makedirs(dirpath, exist_ok=True)
+        ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+        src = tr.source or "none"
+        fname = f"{tr.video_id}_{src}_{ts}.json"
+        path = os.path.join(dirpath, fname)
+        payload = tr.model_dump() if hasattr(tr, "model_dump") else tr.dict()
+        payload["saved_at"] = ts
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        log.info(f"Saved transcript to {path}")
+        return path
+    except Exception as exc:
+        log.warning(f"Failed to save transcript to disk: {exc}")
+        return None
+
+
 def _get_transcript_sync(video_id: str, language: str, use_whisper: bool = False, force_whisper: bool = False, cookies_file: str = "") -> TranscriptResponse:
     url = f"https://www.youtube.com/shorts/{video_id}"
+
+    # Allow global preference for OpenAI Whisper (try it before caption-based methods)
+    from app.config import settings
+    if not force_whisper and getattr(settings, "openai_key", "") and getattr(settings, "openai_prefer", False):
+        log.info(f"Prefer OpenAI Whisper: trying OpenAI transcription first | video_id={video_id}")
+        result = _get_via_openai_full(video_id, language if language != "en" else None, cookies_file=cookies_file)
+        if result:
+            text, lang = result
+            ok, reason = is_usable_transcript(text)
+            log.info(f"Transcript OK (openai) | video_id={video_id} | lang={lang} | chars={len(text)} | quality={reason}")
+            tr = TranscriptResponse(video_id=video_id, url=url, transcript=text, language=lang, source="openai")
+            _save_transcript_to_disk(tr)
+            return tr
 
     if not force_whisper:
         # 1. Fast path via youtube-transcript-api
@@ -527,7 +646,9 @@ def _get_transcript_sync(video_id: str, language: str, use_whisper: bool = False
             text, lang = result
             ok, reason = is_usable_transcript(text)
             log.info(f"Transcript OK (api) | video_id={video_id} | lang={lang} | chars={len(text)} | quality={reason}")
-            return TranscriptResponse(video_id=video_id, url=url, transcript=text, language=lang, source="api")
+            tr = TranscriptResponse(video_id=video_id, url=url, transcript=text, language=lang, source="api")
+            _save_transcript_to_disk(tr)
+            return tr
 
         # 2. Fallback: yt-dlp subtitles
         log.debug(f"Falling back to yt-dlp subtitles | video_id={video_id}")
@@ -536,7 +657,9 @@ def _get_transcript_sync(video_id: str, language: str, use_whisper: bool = False
             text, lang = result
             ok, reason = is_usable_transcript(text)
             log.info(f"Transcript OK (yt-dlp) | video_id={video_id} | lang={lang} | chars={len(text)} | quality={reason}")
-            return TranscriptResponse(video_id=video_id, url=url, transcript=text, language=lang, source="yt-dlp")
+            tr = TranscriptResponse(video_id=video_id, url=url, transcript=text, language=lang, source="yt-dlp")
+            _save_transcript_to_disk(tr)
+            return tr
 
     # 3. Whisper: forced (skip YouTube captions) or fallback
     if use_whisper or force_whisper:
@@ -549,7 +672,9 @@ def _get_transcript_sync(video_id: str, language: str, use_whisper: bool = False
             text, lang = result
             ok, reason = is_usable_transcript(text)
             log.info(f"Transcript OK (whisper) | video_id={video_id} | lang={lang} | chars={len(text)} | quality={reason}")
-            return TranscriptResponse(video_id=video_id, url=url, transcript=text, language=lang, source="whisper")
+            tr = TranscriptResponse(video_id=video_id, url=url, transcript=text, language=lang, source="whisper")
+            _save_transcript_to_disk(tr)
+            return tr
 
     # All methods failed
     if force_whisper:
@@ -559,21 +684,11 @@ def _get_transcript_sync(video_id: str, language: str, use_whisper: bool = False
     else:
         msg = "No transcript available (API and yt-dlp both failed)"
     log.warning(f"Transcript FAILED | video_id={video_id} | {msg}")
-    return TranscriptResponse(video_id=video_id, url=url, transcript=None, error=msg)
+    tr = TranscriptResponse(video_id=video_id, url=url, transcript=None, error=msg)
+    _save_transcript_to_disk(tr)
+    return tr
 
 
-#async def get_transcript(video_id: str, language: str = "en", use_whisper: bool = False, force_whisper: bool = False, cookies_file: str = "") -> TranscriptResponse:
-    """
-    Async entry point for transcript retrieval.
-    Tries youtube-transcript-api first, falls back to yt-dlp subtitles,
-    and optionally falls back to local Whisper transcription.
-    If force_whisper=True, skips YouTube captions and uses Whisper directly.
-    Never raises — returns error field on failure.
-    """
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(
-        None, _get_transcript_sync, video_id, language, use_whisper, force_whisper, cookies_file
-    )
 
 async def get_transcript(video_id: str, language: str = "en", use_whisper: bool = False, force_whisper: bool = False, cookies_file: str = "") -> TranscriptResponse:
     """

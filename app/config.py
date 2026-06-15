@@ -21,6 +21,12 @@ class Settings(BaseSettings):
     # Local Whisper model size when Groq is not available.
     # Options: tiny, base, small, medium, large-v3 (larger = better quality, more RAM)
     whisper_model: str = "small"
+    # OpenAI API key (optional) - set OPENAI_KEY in .env to enable OpenAI Whisper
+    openai_key: str = ""
+    # When true, prefer OpenAI Whisper (API) before caption/subtitle methods
+    openai_prefer: bool = False
+    # Directory to persist transcript results (mounted to host via docker-compose ./logs:/app/logs)
+    transcripts_dir: str = "/app/logs/transcripts"
     # ngrok settings (used in docker-compose, ignored here)
     ngrok_domain: str = ""
     ngrok_authtoken: str = ""

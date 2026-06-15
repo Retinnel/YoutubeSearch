@@ -1,0 +1,1107 @@
+{
+  "nodes": [
+    {
+      "parameters": {
+        "updates": [
+          "message"
+        ],
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        1120,
+        208
+      ],
+      "id": "c8af7aae-3d9c-4f3c-8bcd-0bb3ce227f99",
+      "name": "Telegram Trigger",
+      "webhookId": "3dc6e27c-3051-4ad8-bfcc-8ad65415d0c4",
+      "credentials": {
+        "telegramApi": {
+          "id": "h6NFwBbwGH8W0Gzq",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-4o-mini",
+          "mode": "list",
+          "cachedResultName": "GPT-4O-MINI"
+        },
+        "responses": {
+          "values": [
+            {
+              "content": "=Есть поисковой запрос для ютуба - {{ $json.message.text }}. Сделай 5 похожих запросов на английском, чтобы увеличить покрытие поиска шортсов. Также верни поле \"theme\" с описанием тематики для последующей проверки релевантности."
+            },
+            {
+              "role": "system",
+              "content": "DO NOT use markdown. Answer ONLY with valid JSON like: {\"related_search_queries\": [\"query1\",\"query2\",\"query3\",\"query4\",\"query5\"], \"theme\": \"Brief description of the content niche in English\"}"
+            }
+          ]
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 2.1,
+      "position": [
+        1712,
+        0
+      ],
+      "id": "398d86b9-f900-4221-95f4-26e9b5b41fb9",
+      "name": "Expand Queries (OpenAI)",
+      "credentials": {
+        "openAiApi": {
+          "id": "KZxAJ8AYqx7MCcim",
+          "name": "OpenAI account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const j = $input.all()[0].json;\nlet aiText = \"\";if (j.output && Array.isArray(j.output) && j.output[0].content && Array.isArray(j.output[0].content)) {\n    aiText = j.output[0].content[0].text || \"\";\n} else if (j.content && Array.isArray(j.content)) {\n    aiText = j.content[0]?.text || \"\";\n} else if (j.text) {\n    aiText = j.text;\n} else if (j.message?.content) {\n    aiText = j.message.content;\n}if (typeof aiText !== 'string') {\n    aiText = JSON.stringify(aiText || \"\");\n}let queries = [];\nlet theme = \"\";\nconst jsonMatch = aiText.match(/\\{[\\s\\S]*\\}/);if (jsonMatch) {\n    try {\n        const parsed = JSON.parse(jsonMatch[0]);\n        if (parsed.related_search_queries && Array.isArray(parsed.related_search_queries)) {\n            queries = parsed.related_search_queries;\n        } else {\n            for (const key in parsed) {\n                if (Array.isArray(parsed[key])) {\n                    queries = parsed[key];\n                    break;\n                }\n            }\n        }\n        theme = parsed.theme || \"\";\n    } catch(e) {\n        console.log(\"Ошибка парсинга списка запросов\");\n    }\n}\n\nif (queries.length === 0) {\n    queries = [\"IT outsourcing shorts\"];\n}\n\nreturn queries.map(q => ({ json: { query: q, theme: theme, all_queries: queries } }));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1680,
+        208
+      ],
+      "id": "536e6253-db9a-4234-bf75-fa813c13ac38",
+      "name": "Parse Queries"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://youtube-api:8000/api/v1/search_shorts",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-KEY",
+              "value": "change_me_to_a_strong_secret"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\"query\": \"{{ $json.query }}\", \"max_results\": 5, \"min_views\": 0, \"min_outlier_score\": 0}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1936,
+        208
+      ],
+      "id": "d7a9f27e-d0ce-4597-abe5-a858530ea11e",
+      "name": "Search Shorts (FastAPI)"
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-4o-mini",
+          "mode": "list",
+          "cachedResultName": "GPT-4O-MINI"
+        },
+        "responses": {
+          "values": [
+            {
+              "role": "system",
+              "content": "=You are a content relevance analyst. The user is looking for YouTube Shorts about this theme: {{ $json.theme }}. Consider ALL search queries listed below when evaluating relevance — a video is relevant if it matches ANY of the queries, not just the one it was found under. Rate relevance 1-10. If transcript is unavailable, judge by title and channel name only. Return ONLY valid JSON, no markdown."
+            },
+            {
+              "content": "=Video title: {{ $json.title }}\nChannel: {{ $json.channel_title }}\nDuration: {{ $json.duration }}s\nOutlier score: {{ $json.outlier_score !== null ? $json.outlier_score + 'x (viral coefficient)' : 'unknown' }}\n\nAll search queries (evaluate against all of them): {{ $json.all_queries && $json.all_queries.length ? $json.all_queries.join(' | ') : $json.search_query }}\n\nTranscript: {{ $json.transcript ? $json.transcript : \"(unavailable)\" }}\n\nReturn JSON: {\"score\": <int 1-10>, \"reason\": \"<brief explanation in Russian>\", \"should_rewrite\": <true if score >= 7>}"
+            }
+          ]
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 2.1,
+      "position": [
+        3376,
+        0
+      ],
+      "id": "88c0a272-1001-43d7-8fc2-ce55975755b7",
+      "name": "Score Relevance (OpenAI)",
+      "credentials": {
+        "openAiApi": {
+          "id": "KZxAJ8AYqx7MCcim",
+          "name": "OpenAI account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// runOnceForAllItems: pairs LLM outputs with original shorts from Merge Transcript by index.\n// Handles both OpenAI node output and Google chainLlm output formats.\nconst llmOutputs = $input.all();\nconst shorts = $('Merge Transcript').all();\n\nreturn llmOutputs.map(function(item, i) {\n    const j = item.json;\n    const short = shorts[i] ? shorts[i].json : {};\n\n    // Extract text from various LLM output structures\n    let aiText = '';\n    if (j.output && Array.isArray(j.output) && j.output[0]?.content && Array.isArray(j.output[0].content)) {\n        // OpenAI node format\n        aiText = j.output[0].content[0].text || '';\n    } else if (j.content && Array.isArray(j.content)) {\n        aiText = j.content[0]?.text || '';\n    } else if (j.text) {\n        // chainLlm (Google Gemini) format\n        aiText = j.text;\n    } else if (j.message?.content) {\n        aiText = j.message.content;\n    }\n\n    if (typeof aiText !== 'string') {\n        aiText = JSON.stringify(aiText || '');\n    }\n\n    let score = {};\n    const match = aiText.match(/\\{[\\s\\S]*\\}/);\n    if (match) {\n        try { score = JSON.parse(match[0]); } catch(e) {}\n    }\n\n    return {\n        json: {\n            video_id: short.video_id || '',\n            url: short.url || '',\n            title: short.title || '',\n            channel_title: short.channel_title || '',\n            duration: short.duration || null,\n            theme: short.theme || '',\n            view_count: short.view_count || null,\n            outlier_score: short.outlier_score !== undefined ? short.outlier_score : null,\n            engagement_rate: short.engagement_rate !== undefined ? short.engagement_rate : null,\n            transcript: short.transcript || null,\n            score: typeof score.score === 'number' ? score.score : 0,\n            reason: score.reason || '',\n            should_rewrite: score.should_rewrite === true\n        }\n    };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3616,
+        208
+      ],
+      "id": "e7f17f59-b9c9-4027-aaa8-c74e1e628281",
+      "name": "Parse Score"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "filter-score-1",
+              "leftValue": "={{ $json.score }}",
+              "rightValue": 7,
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2.3,
+      "position": [
+        3856,
+        208
+      ],
+      "id": "cb1601cf-b5b4-45b5-a566-6960d10a6376",
+      "name": "Filter Score >= 7"
+    },
+    {
+      "parameters": {
+        "fieldsToAggregate": {
+          "fieldToAggregate": [
+            {
+              "fieldToAggregate": "video_id"
+            },
+            {
+              "fieldToAggregate": "url"
+            },
+            {
+              "fieldToAggregate": "title"
+            },
+            {
+              "fieldToAggregate": "channel_title"
+            },
+            {
+              "fieldToAggregate": "duration"
+            },
+            {
+              "fieldToAggregate": "score"
+            },
+            {
+              "fieldToAggregate": "reason"
+            },
+            {
+              "fieldToAggregate": "theme"
+            },
+            {
+              "fieldToAggregate": "view_count"
+            },
+            {
+              "fieldToAggregate": "transcript"
+            },
+            {
+              "fieldToAggregate": "transcript_source"
+            },
+            {
+              "fieldToAggregate": "outlier_score"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.aggregate",
+      "typeVersion": 1,
+      "position": [
+        4576,
+        208
+      ],
+      "id": "f6e22c7b-e225-4b49-a2f3-d0df60e66bf2",
+      "name": "Aggregate Results"
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.all()[0]?.json;if (!data || !data.title || data.title.length === 0) {\n    return [{ json: { text: \"🔍 Релевантных шортсов по заданной тематике не найдено 😔\" } }];\n}\nconst messages = [];\nlet part = 1;\nlet currentMessage = `🎥 *Найдены релевантные шортсы! (Часть ${part})*\\n\\n`;\nfor (let i = 0; i < data.title.length; i++) {\n    const title = String(data.title[i]).replace(/[*_\\[\\]`]/g, '').substring(0, 80);\n    const url = data.url[i];\n    const score = data.score[i];\n    const reason = String(data.reason[i] || '').replace(/[*_\\[\\]`]/g, '').substring(0, 180);\n    const channel = String(data.channel_title[i] || 'Unknown').replace(/[*_\\[\\]`]/g, '');\n    const duration = data.duration[i];\n    const views = data.view_count && data.view_count[i] ? Number(data.view_count[i]).toLocaleString('ru-RU') : '?';\n    const outlier = data.outlier_score && data.outlier_score[i] ? ` | 📈 ${data.outlier_score[i]}x` : '';\n    const block = `✅ *${title}*\\n📺 ${channel} | ⏱ ${duration}s | 👁 ${views}${outlier} | 🎯 ${score}/10\\n🔗 ${url}\\n💬 ${reason}\\n\\n`;\n    if ((currentMessage.length + block.length) > 3800) {\n        messages.push({ json: { text: currentMessage } });\n        part++;\n        currentMessage = `🎥 *Продолжение (Часть ${part}):*\\n\\n`;\n    }\n    currentMessage += block;\n}\nif (currentMessage.replace(/\\*.*?\\*/g, '').trim().length > 0) {\n    messages.push({ json: { text: currentMessage } });\n}\nreturn messages;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4816,
+        208
+      ],
+      "id": "14510d01-6b4e-4b93-84ab-9b69e1d798f9",
+      "name": "Format Telegram Message"
+    },
+    {
+      "parameters": {
+        "chatId": "909658267",
+        "text": "={{ $json.text }}",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        5056,
+        208
+      ],
+      "id": "2b966467-aed5-41d1-8fcf-4c275e0f41f2",
+      "name": "Send to Telegram",
+      "webhookId": "5f6ea418-e99b-4b43-bd3c-6b5b5c6ef572",
+      "credentials": {
+        "telegramApi": {
+          "id": "h6NFwBbwGH8W0Gzq",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// runOnceForAllItems: receives all HTTP responses at once\n// One item per query -> we enrich each and return N items for Split Out\n//\n// === LLM PROVIDER SWITCH ===\n// Change LLM_PROVIDER below to switch between \"openai\" and \"google\" for scoring.\nconst LLM_PROVIDER = $('Config').first().json.llm_provider || \"google\";const allItems = $input.all();\nconst theme = $('Parse Queries').first().json.theme || '';\n// Collect all search queries expanded by the LLM (shared across all branches)\nconst all_queries = $('Parse Queries').all().map(item => item.json.query).filter(Boolean);const results = [];\nfor (const item of allItems) {\n    const data = item.json;\n    const query = data.query || '';    const enrichedShorts = (data.shorts || []).map(function(s) {\n        return {\n            video_id: s.video_id || '',\n            url: s.url || '',\n            title: s.title || 'No title',\n            channel_id: s.channel_id || null,\n            channel_title: s.channel_title || null,\n            duration: s.duration || null,\n            search_query: query,\n            theme: theme,\n            all_queries: all_queries,\n            view_count: s.view_count || null,\n            outlier_score: s.outlier_score !== undefined ? s.outlier_score : null,\n            engagement_rate: s.engagement_rate !== undefined ? s.engagement_rate : null,\n            llm_provider: LLM_PROVIDER\n        };\n    });    results.push({ json: { shorts: enrichedShorts } });\n}return results.length > 0 ? results : [{ json: { shorts: [] } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2176,
+        208
+      ],
+      "id": "5ba85f56-d82d-4acc-bb2b-f5b38c56bcdf",
+      "name": "Enrich Shorts"
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "shorts",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        2416,
+        208
+      ],
+      "id": "055ac06d-958f-4682-9072-3b0826a62f48",
+      "name": "Split Shorts"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://youtube-api:8000/api/v1/get_transcript",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-KEY",
+              "value": "change_me_to_a_strong_secret"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\"video_id\": \"{{ $json.video_id }}\"}",
+        "options": {
+          "timeout": 600000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        2656,
+        208
+      ],
+      "id": "9faa5459-9dd4-41de-9e44-4c31999bc41b",
+      "name": "Get Transcript (FastAPI)"
+    },
+    {
+      "parameters": {
+        "jsCode": "// runOnceForAllItems: pairs transcript responses with original shorts by index.\n// HTTP Request preserves order, so index i in transcripts == index i in Split Shorts.\nconst transcripts = $input.all();\nconst shorts = $('Split Shorts').all();return transcripts.map(function(item, i) {\n    const short = shorts[i] ? shorts[i].json : {};\n    const t = item.json;\n    return {\n        json: {\n            video_id: short.video_id || '',\n            url: short.url || '',\n            title: short.title || 'No title',\n            channel_id: short.channel_id || null,\n            channel_title: short.channel_title || null,\n            duration: short.duration || null,\n            search_query: short.search_query || '',\n            theme: short.theme || '',\n            all_queries: short.all_queries || [],\n            view_count: short.view_count || null,\n            outlier_score: short.outlier_score !== undefined ? short.outlier_score : null,\n            engagement_rate: short.engagement_rate !== undefined ? short.engagement_rate : null,\n            llm_provider: short.llm_provider || 'openai',\n            transcript: t.transcript || null,\n            transcript_source: t.source || null,\n            transcript_error: t.error || null\n        }\n    };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2896,
+        208
+      ],
+      "id": "673d8004-351d-4bdd-a7ad-2d31255d179d",
+      "name": "Merge Transcript"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.llm_provider }}",
+                    "rightValue": "openai",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        3136,
+        208
+      ],
+      "id": "47997963-8906-4cae-835a-c2143e5e7cdb",
+      "name": "LLM Router"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=You are a content relevance analyst. The user is looking for YouTube Shorts about this theme: {{ $json.theme }}.\nConsider ALL search queries listed below when evaluating relevance — a video is relevant if it matches ANY of the queries, not just the one it was found under.\n\nVideo title: {{ $json.title }}\nChannel: {{ $json.channel_title }}\nDuration: {{ $json.duration }}s\nOutlier score: {{ $json.outlier_score !== null ? $json.outlier_score + 'x (viral coefficient)' : 'unknown' }}\n\nAll search queries (evaluate against all of them): {{ $json.all_queries && $json.all_queries.length ? $json.all_queries.join(' | ') : $json.search_query }}\n\nTranscript: {{ $json.transcript ? $json.transcript : \"(unavailable)\" }}\n\nRate relevance 1-10. If transcript is unavailable, judge by title and channel name only.\nReturn ONLY valid JSON, no markdown:\n{\"score\": <int 1-10>, \"reason\": \"<brief explanation in Russian>\", \"should_rewrite\": <true if score >= 7>}"
+      },
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.5,
+      "position": [
+        3376,
+        400
+      ],
+      "id": "9f1057f7-7549-406f-80b2-13405aaa3318",
+      "name": "Score Relevance (Google)"
+    },
+    {
+      "parameters": {
+        "modelName": {
+          "__rl": true,
+          "value": "models/gemini-2.0-flash",
+          "mode": "list",
+          "cachedResultName": "models/gemini-2.0-flash"
+        },
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1,
+      "position": [
+        3376,
+        608
+      ],
+      "id": "1504a1c8-f6ec-477e-9f81-bc6cb7ad1c22",
+      "name": "Google Gemini Model"
+    },
+    {
+      "parameters": {
+        "jsCode": "// =============================================\n// LLM PROVIDER SWITCH - change value here only\n// 'google' = Google Gemini (default)\n// 'openai' = OpenAI GPT-4o-mini\n// =============================================\nconst LLM_PROVIDER = \"openai\";\n\n// =============================================\n// FORCE WHISPER AFTER FILTER\n// true  = re-transcribe high-scoring videos with Whisper (better quality, slower)\n//         Requires: WHISPER_ENABLED=true in .env and openai-whisper installed\n// false = keep the transcript already obtained during the initial pipeline step\n// =============================================\nconst FORCE_WHISPER_AFTER_FILTER = true;\n\nconst items = $input.all();\nreturn items.map(function(item) {\n    return { json: Object.assign({}, item.json, {\n        llm_provider: LLM_PROVIDER,\n        force_whisper_after_filter: FORCE_WHISPER_AFTER_FILTER\n    }) };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1296,
+        208
+      ],
+      "id": "47d86521-a73d-46f3-ab8d-6bbe687963c3",
+      "name": "Config"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.llm_provider }}",
+                    "operator": {
+                      "operation": "equals",
+                      "type": "string"
+                    },
+                    "rightValue": "openai"
+                  }
+                ],
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                }
+              }
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        1504,
+        208
+      ],
+      "id": "c32d6b46-0d43-440c-93a2-b8c8b3b9e1e3",
+      "name": "Expand Queries Router"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Есть поисковой запрос для ютуба - {{ $json.message.text }}. Сделай 5 похожих запросов на английском, чтобы увеличить покрытие поиска шортсов. Также верни поле \"theme\" с описанием тематики для последующей проверки релевантности. DO NOT use markdown. Answer ONLY with valid JSON like: {\"related_search_queries\": [\"query1\",\"query2\",\"query3\",\"query4\",\"query5\"], \"theme\": \"Brief description of the content niche in English\"}"
+      },
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.5,
+      "position": [
+        1712,
+        400
+      ],
+      "id": "233054bc-e25d-4cdb-a300-fe626e0b3c33",
+      "name": "Expand Queries (Google)"
+    },
+    {
+      "parameters": {
+        "modelName": {
+          "__rl": true,
+          "value": "models/gemini-2.0-flash",
+          "mode": "list",
+          "cachedResultName": "Gemini 2.0 Flash"
+        },
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1,
+      "position": [
+        1712,
+        624
+      ],
+      "id": "86271e63-20d9-467a-88a5-4ba151249aa9",
+      "name": "Google Gemini Model (Expand)"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://youtube-api:8000/api/v1/get_transcript",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-KEY",
+              "value": "change_me_to_a_strong_secret"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\"video_id\": \"{{ $json.video_id }}\", \"force_whisper\": {{ $(\"Config\").first().json.force_whisper_after_filter ? \"true\" : \"false\" }}}",
+        "options": {
+          "timeout": 600000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        4128,
+        0
+      ],
+      "id": "38c0e7e9-f002-470f-b8ef-317305d3e6b2",
+      "name": "Force Transcribe (Whisper)",
+      "notes": "Re-transcribes high-scoring videos with Whisper for better quality. Enable WHISPER_ENABLED=true in .env."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Merge Whisper transcript results back into the scored Short items.\n// If Whisper succeeded, replace the transcript; otherwise keep the original.\nconst whisperResults = $input.all();\nconst filtered = $('Filter Score >= 7').all();\n\nreturn whisperResults.map(function(item, i) {\n    const original = filtered[i] ? filtered[i].json : {};\n    const w = item.json;\n    const newTranscript = w.transcript || null;\n    return {\n        json: Object.assign({}, original, {\n            transcript: newTranscript || original.transcript,\n            transcript_source: newTranscript ? (w.source || 'whisper') : original.transcript_source,\n            whisper_error: w.error || null\n        })\n    };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4352,
+        16
+      ],
+      "id": "72f61bd0-b446-4315-9ad7-4183e3dbfe38",
+      "name": "Update Whisper Transcript"
+    },
+    {
+      "parameters": {
+        "jsCode": "\n// Build a UTF-8 text file with all transcripts and attach it as binary data.\nconst data = $input.all()[0]?.json;\n\nif (!data || !data.title || !data.title.length) {\n    const empty = Buffer.from('Нет результатов для транскрипции.', 'utf-8').toString('base64');\n    return [{\n        json: { caption: '📄 Транскрипций нет' },\n        binary: { transcript_file: { data: empty, mimeType: 'text/plain', fileName: 'transcripts.txt' } }\n    }];\n}\n\nconst now = new Date().toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' });\nconst theme = (data.theme && data.theme[0]) ? data.theme[0] : '—';\nconst lines = [];\n\nlines.push('ТРАНСКРИПЦИИ РЕЛЕВАНТНЫХ YOUTUBE SHORTS');\nlines.push('='.repeat(60));\nlines.push('Дата поиска: ' + now);\nlines.push('Тема: ' + theme);\nlines.push('Найдено видео: ' + data.title.length);\nlines.push('='.repeat(60));\nlines.push('');\n\nfor (let i = 0; i < data.title.length; i++) {\n    lines.push('[' + (i + 1) + '] ' + (data.title[i] || '—'));\n    lines.push('    Канал:   ' + (data.channel_title?.[i] || '—'));\n    lines.push('    Ссылка:  ' + (data.url?.[i] || '—'));\n    lines.push('    Длина:   ' + (data.duration?.[i] || '?') + 's');\n    lines.push('    Оценка:  ' + (data.score?.[i] || '?') + '/10');\n    const outlier = data.outlier_score?.[i];\n    if (outlier) lines.push('    Вирал.:  ' + outlier + 'x');\n    lines.push('    Причина: ' + (data.reason?.[i] || '—'));\n    lines.push('    Источник транскрипции: ' + (data.transcript_source?.[i] || '—'));\n    lines.push('');\n    lines.push('    --- ТРАНСКРИПЦИЯ ---');\n\n    const transcript = data.transcript?.[i];\n    if (transcript && transcript.trim()) {\n        // Word-wrap at ~80 chars\n        const words = transcript.trim().split(/\\s+/);\n        let line = '    ';\n        for (const word of words) {\n            if (line.length + word.length + 1 > 84) {\n                lines.push(line.trimEnd());\n                line = '    ' + word + ' ';\n            } else {\n                line += word + ' ';\n            }\n        }\n        if (line.trim()) lines.push(line.trimEnd());\n    } else {\n        lines.push('    (транскрипция недоступна)');\n    }\n\n    lines.push('');\n    lines.push('-'.repeat(60));\n    lines.push('');\n}\n\nconst content = lines.join('\\n');\nconst base64 = Buffer.from(content, 'utf-8').toString('base64');\nconst dateStr = new Date().toISOString().slice(0, 10);\n\nreturn [{\n    json: { caption: '\\uD83D\\uDCCB Транскрипции: ' + data.title.length + ' видео по теме: ' + theme },\n    binary: {\n        transcript_file: {\n            data: base64,\n            mimeType: 'text/plain',\n            fileName: 'transcripts_' + dateStr + '.txt',\n        }\n    }\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4576,
+        448
+      ],
+      "id": "8509a881-173d-4966-8237-e9eb72100133",
+      "name": "Build Transcript File"
+    },
+    {
+      "parameters": {
+        "operation": "sendDocument",
+        "chatId": "909658267",
+        "binaryData": true,
+        "binaryPropertyName": "transcript_file",
+        "additionalFields": {
+          "caption": "={{ $json.caption }}"
+        }
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1,
+      "position": [
+        4816,
+        448
+      ],
+      "id": "fba1c1fa-1328-4aa8-893e-054647e9c92d",
+      "name": "Send Transcript File",
+      "webhookId": "7f47915b-1685-4ca2-a88d-463561cddd07",
+      "credentials": {
+        "telegramApi": {
+          "id": "h6NFwBbwGH8W0Gzq",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-5-mini",
+          "mode": "list",
+          "cachedResultName": "GPT-5-MINI"
+        },
+        "responses": {
+          "values": [
+            {
+              "content": "=Ты — эксперт по контент-стратегии и анализу игрового контента. Твоя задача: проанализировать транскрипцию видео и вернуть результат СТРОГО в формате JSON.\n\nТранскрипция:\n\"\"\"\n{{ $json.transcript }}\n\"\"\"\n\nВерни ответ в формате JSON по следующей схеме:\n\n{\n  \"summary\": \"Краткое описание видео (2-3 предложения)\",\n  \"hook_analysis\": {\n    \"original_hook\": \"Описание того, что было в начале\",\n    \"hook_effectiveness\": \"Оценка от 1 до 10 и почему\",\n    \"suggested_hooks\": [\"Вариант 1\", \"Вариант 2\", \"Вариант 3\"]\n  },\n  \"core_value\": \"Какую главную проблему или потребность зрителя закрывает видео?\",\n  \"key_insights\": [\"Инсайт 1\", \"Инсайт 2\", \"Инсайт 3\"],\n  \"cta\": {\n    \"original_cta\": \"Что было в видео\",\n    \"suggested_cta\": \"Улучшенный вариант призыва к действию\"\n  },\n  \"improvement_recommendations\": [\"Рекомендация 1\", \"Рекомендация 2\"]\n}\n\nОтвечай только JSON-кодом, без предисловий и объяснений."
+            }
+          ]
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 2.3,
+      "position": [
+        3840,
+        704
+      ],
+      "id": "26d1f21c-cb62-423f-946e-1e33e8809401",
+      "name": "Message a model",
+      "credentials": {
+        "openAiApi": {
+          "id": "KZxAJ8AYqx7MCcim",
+          "name": "OpenAI account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-5-mini",
+          "mode": "list",
+          "cachedResultName": "GPT-5-MINI"
+        },
+        "responses": {
+          "values": [
+            {
+              "content": "=Ты — профессиональный креативный продюсер мобильных игр. Твоя задача — преобразовать данные анализа видео в четкое техническое задание (ТЗ) для монтажёра.\n\n### ДАННЫЕ ДЛЯ РАБОТЫ:\n1. КОНТЕКСТ ИГРЫ:\n\"\"\"\n# Game Brief — Legion TD x20 NG Mobile\n## Что за игра\nМобильная адаптация Legion TD x20 NextGen — одного из самых популярных модов для Warcraft III: The Frozen Throne. Оригинальный мод Legion TD существует с 2009 года, его играли миллионы раз. x20 NG (NextGen) — это актуальная версия от OZgame team (G0mez и команда), с активным комьюнити и Discord-сервером.\n## Жанр\nTower Defense + PvP (Auto Battler элементы). Ближайшие аналоги: Legion TD 2 (Steam, standalone), Squadron TD (StarCraft 2), Teamfight Tactics и DOTA Underlords (auto battler вдохновение).\n## Геймплей\n- Игроки делятся на 2 команды (2v2, 3v3, 4v4)\n- Каждый раунд тратишь золото на строительство армии воинов для защиты короля\n- Тратишь lumber (ресурс) на отправку юнитов-атакеров в сторону вражеского короля\n- Волны врагов нарастают — нужна стратегия: баланс между защитой и атакой\n- x20 модификатор — усиленный режим, больше юнитов, больше хаоса, больше веселья\n- 100+ уникальных бойцов с разными способностями, аурами, синергиями\n- Быстрые матчи (10-20 минут) — идеально для мобильного формата\n## Платформа\niOS + Android\n## Целевая аудитория\n- Фанаты оригинального мода Legion TD из WC3 (ностальгия)\n- Игроки Legion TD 2 на Steam (кроссовер аудитория)\n- Мобильные геймеры, любящие tower defense (Bloons TD, Kingdom Rush)\n- Фанаты auto battlers (TFT, Underlords)\n- Казуальные стратеги, ищущие глубокий но быстрый PvP\n## Уникальность\n- Первый раз легендарный WC3 мод доступен на мобилках\n- Глубокая стратегия, нехарактерная для мобильных TD\n- PvP-фокус (не просто \"волны врагов\", а реальное соревнование с людьми)\n- x20 режим — хаотичный, зрелищный, идеальный для контента\n- Ностальгический фактор для огромной WC3-аудитории\n## Стадия разработки\nВ активной разработке, скоро релиз. Разрабатывается в Interexy — кастомная софтверная компания с 350+ senior разработчиками из Восточной Европы.\n## Tone of Voice для контента\n- Casual, дружелюбный\n- Немного ностальгический (WC3 vibes, \"помните этот мод?\")\n- Но современный и энергичный (мобильная аудитория)\n- Можно использовать юмор и мемы из WC3/gaming культуры\n- Хайповый когда показываем геймплей (x20 хаос = визуально впечатляет)\n## Ключевые хуки для контента\n- \"Помните Legion TD из Warcraft 3? Теперь на телефоне\"\n- \"Этот мод играли миллионы людей. Мы делаем его мобильным\"\n- \"Когда 20 юнитов атакуют одновременно\" (x20 хаос)\n- Сравнение с Legion TD 2 / TFT / Underlords\n- Behind the scenes разработки: \"Как перенести WC3 мод на мобилки\"\n- \"Самый хардкорный TD на мобилках\"\n\"\"\"\n\n2. АНАЛИЗ ВИДЕО (ИЗ ПРЕДЫДУЩЕЙ НОДЫ):\n\"\"\"\n{{ $json.output[0].content[0].text }}\n\"\"\"\n\n### ЗАДАЧА:\nСгенерируй ТЗ в формате JSON. Твоя цель — сделать так, чтобы монтажёр сразу понял, какой стиль, темп и контент нужны для продвижения Legion TD x20 NG.\n\nВерни ответ СТРОГО в следующем формате:\n\n{\n  \"project_title\": \"Название проекта\",\n  \"concept\": \"Краткая концепция ролика (цель: ностальгия/хайп/обучение)\",\n  \"hook_section\": {\n    \"visual_hook\": \"Что именно показать в 0-3 секунде (кадр)\",\n    \"audio_hook\": \"Звуковое сопровождение (музыка/SFX)\"\n  },\n  \"body_structure\": [\n    {\"timing\": \"0-10s\", \"action\": \"Описание того, что происходит на экране\"},\n    {\"timing\": \"10-30s\", \"action\": \"Описание развития геймплея и динамики\"},\n    {\"timing\": \"30-end\", \"action\": \"Финал, CTA и логотип\"}\n  ],\n  \"visual_style\": {\n    \"editing_pace\": \"Темп монтажа (динамичный/спокойный)\",\n    \"effects\": [\"Список эффектов\", \"Переходы\", \"Плашки\"],\n    \"tone\": \"Описание настроения (ностальгия, энергичность, хаос)\"\n  },\n  \"cta_instruction\": \"Что именно сделать в конце (текст на экране/диктор)\",\n  \"pro_tips_for_editor\": [\"Совет 1\", \"Совет 2\"]\n}\n\nВАЖНО: Не пиши никаких вводных слов, только чистый JSON."
+            }
+          ]
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 2.3,
+      "position": [
+        4192,
+        704
+      ],
+      "id": "724141b2-6f24-46e2-af8a-42c53a4d1ce6",
+      "name": "Message a model1",
+      "credentials": {
+        "openAiApi": {
+          "id": "KZxAJ8AYqx7MCcim",
+          "name": "OpenAI account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// runOnceForAllItems: merge and dedupe by video_id\nconst allItems = $input.all();\nlet allShorts = [];\nfor (const item of allItems) { const data = item.json; const query = data.query || ''; (data.shorts || []).forEach(s => allShorts.push({ video_id: s.video_id || '', url: s.url || '', title: s.title || 'No title', channel_id: s.channel_id || null, channel_title: s.channel_title || null, duration: s.duration || null, search_query: query, theme: data.theme || '', all_queries: data.all_queries || [], view_count: s.view_count || null, outlier_score: s.outlier_score !== undefined ? s.outlier_score : null, engagement_rate: s.engagement_rate !== undefined ? s.engagement_rate : null })); }\nconst uniqMap = {};\nfor (const s of allShorts) { if (!s.video_id) continue; if (!uniqMap[s.video_id]) { uniqMap[s.video_id] = s; } else { const existing = uniqMap[s.video_id]; for (const k in s) { if ((existing[k] === null || existing[k] === undefined || existing[k] === '') && s[k]) { existing[k] = s[k]; } } } }\nconst uniqueShorts = Object.values(uniqMap);\nreturn uniqueShorts.length > 0 ? [{ json: { shorts: uniqueShorts } }] : [{ json: { shorts: [] } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2336,
+        208
+      ],
+      "id": "e3b2c8a0-unique-0000-0000-000000000001",
+      "name": "Unique Videos"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build JSON file from model output and attach as binary\nconst items = $input.all();\nreturn items.map(item => { const j = item.json; let aiText = ''; if (j.output && Array.isArray(j.output) && j.output[0].content && Array.isArray(j.output[0].content)) aiText = j.output[0].content[0].text || ''; else if (j.content && Array.isArray(j.content)) aiText = j.content[0]?.text || ''; else if (j.text) aiText = j.text; else if (j.message?.content) aiText = j.message.content; if (typeof aiText !== 'string') aiText = JSON.stringify(aiText || ''); let parsed = null; const match = aiText.match(/\\\\{[\\\\s\\\\S]*\\\\}/); if (match) { try { parsed = JSON.parse(match[0]); } catch(e) { parsed = match[0]; } } else { try { parsed = JSON.parse(aiText); } catch(e) { parsed = aiText; } } const fileContent = typeof parsed === 'string' ? parsed : JSON.stringify(parsed, null, 2); const fileName = (j.video_id || 'analysis') + '_' + new Date().toISOString().replace(/[:.]/g,'-') + '.json'; const base64 = Buffer.from(fileContent, 'utf-8').toString('base64'); return { json: { video_id: j.video_id || null }, binary: { analysis_file: { data: base64, mimeType: 'application/json', fileName: fileName } } }; });"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4432,
+        704
+      ],
+      "id": "5f1a2b3c-4d5e-6f70-1122-334455667788",
+      "name": "Build JSON File"
+    },
+    {
+      "parameters": {
+        "operation": "sendDocument",
+        "chatId": "909658267",
+        "binaryData": true,
+        "binaryPropertyName": "analysis_file",
+        "additionalFields": {
+          "caption": "={{ 'AI analysis for video: ' + $json.video_id }}",
+          "parse_mode": "Markdown"
+        }
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        4672,
+        704
+      ],
+      "id": "6a7b8c9d-0e1f-2345-6789-0abcdef12345",
+      "name": "Send JSON to Telegram",
+      "credentials": {
+        "telegramApi": {
+          "id": "h6NFwBbwGH8W0Gzq",
+          "name": "Telegram account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Expand Queries (OpenAI)": {
+      "main": [
+        [
+          {
+            "node": "Parse Queries",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Queries": {
+      "main": [
+        [
+          {
+            "node": "Search Shorts (FastAPI)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search Shorts (FastAPI)": {
+      "main": [
+        [
+          {
+            "node": "Enrich Shorts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Score Relevance (OpenAI)": {
+      "main": [
+        [
+          {
+            "node": "Parse Score",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Score": {
+      "main": [
+        [
+          {
+            "node": "Filter Score >= 7",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Score >= 7": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Results",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Message a model",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate Results": {
+      "main": [
+        [
+          {
+            "node": "Format Telegram Message",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Build Transcript File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Telegram Message": {
+      "main": [
+        [
+          {
+            "node": "Send to Telegram",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enrich Shorts": {
+      "main": [
+        [
+          {
+            "node": "Unique Videos",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Shorts": {
+      "main": [
+        [
+          {
+            "node": "Get Transcript (FastAPI)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Transcript (FastAPI)": {
+      "main": [
+        [
+          {
+            "node": "Merge Transcript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Transcript": {
+      "main": [
+        [
+          {
+            "node": "LLM Router",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM Router": {
+      "main": [
+        [
+          {
+            "node": "Score Relevance (OpenAI)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Score Relevance (Google)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Score Relevance (Google)": {
+      "main": [
+        [
+          {
+            "node": "Parse Score",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Gemini Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Score Relevance (Google)",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Expand Queries Router",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Expand Queries Router": {
+      "main": [
+        [
+          {
+            "node": "Expand Queries (OpenAI)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Expand Queries (Google)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Expand Queries (Google)": {
+      "main": [
+        [
+          {
+            "node": "Parse Queries",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Gemini Model (Expand)": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Expand Queries (Google)",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Force Transcribe (Whisper)": {
+      "main": [
+        [
+          {
+            "node": "Update Whisper Transcript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Whisper Transcript": {
+      "main": [
+        []
+      ]
+    },
+    "Build Transcript File": {
+      "main": [
+        [
+          {
+            "node": "Send Transcript File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Message a model": {
+      "main": [
+        [
+          {
+            "node": "Message a model1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Message a model1": {
+      "main": [
+        [
+          {
+            "node": "Build JSON File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build JSON File": {
+      "main": [
+        [
+          {
+            "node": "Send JSON to Telegram",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send JSON to Telegram": {
+      "main": [
+        []
+      ]
+    },
+    "Unique Videos": {
+      "main": [
+        [
+          {
+            "node": "Split Shorts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+  },
+  "pinData": {
+    "Filter Score >= 7": [
+      {
+        "video_id": "YZ5tOe7y9x4",
+        "url": "https://www.youtube.com/shorts/YZ5tOe7y9x4",
+        "title": "Software engineer interns on their first day be like...",
+        "channel_title": "Frying Pan",
+        "duration": 141,
+        "theme": "Exploring the daily routines and experiences of software developers and programmers.",
+        "view_count": 15523024,
+        "outlier_score": 1.89,
+        "engagement_rate": null,
+        "transcript": "Oh Hi, hello, hey, how's it going? Yeah, pretty good. Okay. So welcome to the company. It's your first day I will help you on board. So the first thing you want to do is download the code base So go ahead and clone the git repository. Can you see my screen? Yeah, now I see it Easy I know how to do this. Alright, so now you want to go ahead and install npm-node-git-vs-code or you can use any IDE you want Then you want to use your email to sign in to Confluence for documentation, Azure DevOps, Jira, and GitHub. You got that? Yeah, it's just downloading. Yeah, perfect. So we're a pretty diverse company. We use a lot of different languages It's just downloading. Yeah, perfect. So we're a pretty diverse company. We use multiple technologies here So you want to go ahead and also install Python, Java, C Hashtag, C++, and once you get that code base set up You want to go ahead and use the command line to directly install Linux, TypeScript, JavaScript, and set up the configurations I won't show you that because you know, it's it's just you know, it's pretty simple. So yeah, do you have any questions? Yeah, I think your screen is lagged. Alright, so no questions. Perfect. You seem to be pretty bright I'll give you your first task right away. It's pretty basic, you know, just to get your feet wet So basically you're gonna fix this button Oh, okay, that's not too bad. And then you want to make this button interact from front to back end It should make exactly 7.5 API calls and return the data to the AWS cloud WordPress which is our middle end but you want to make sure it doesn't bottleneck so add some multi-threading in the JavaScript and Are you familiar with machine learning? No. Yeah, you probably are right? You kids are really good with that stuff nowadays So maybe just add a little bit of unsupervised classification and we can you know Cluster the HTML attributes and if you really want to go above and beyond You can also use bootstrap to strap everything together at the end, you know, just pretty simple I have to jump in on another call So don't hesitate to ask me if you have any questions and you'll be done with this in like one hour, right? So I'll see you then. Good luck You",
+        "score": 8,
+        "reason": "Видео отображает повседневный опыт и рутинные задачи разработчиков программного обеспечения, что соответствует запросам.",
+        "should_rewrite": true
+      },
+      {
+        "video_id": "eMlBbKDXhrY",
+        "url": "https://www.youtube.com/shorts/eMlBbKDXhrY",
+        "title": "SOFTWARE ENGINEER DAY IN THE LIFE IN THE OFFICE | My Friday in 60 Seconds #SHORT",
+        "channel_title": "Petia Davidova",
+        "duration": 61,
+        "theme": "Exploring the daily routines and experiences of software developers and programmers.",
+        "view_count": 80306,
+        "outlier_score": 0.01,
+        "engagement_rate": null,
+        "transcript": "Welcome to another day in the life of a software engineer in London, office edition. I woke up at 7 and it was still dark outside. I got ready for work and headed out on my 25 minute commute. When I got to my desk I got all set up and ready for the day, I went through my appointments and my emails and I went to the cafeteria for a coffee and a healthy snack. I started the day with a quick code review and fixing a bug in the feature I was working on. Then it was time for my daily stand up but this time it was in person. After that I got my annual flu shot and I got my weekly PCR test while I was at it. I rewarded myself with a diet 7 up on the terrace. Just look at that view. After that I did one more hour of coding and then I had lunch in the office with my team. Today we had some lovely baguettes. The afternoon consisted of more coding, making a Christmas card for a charity initiative and more coffee. I finished work at around 5.30 and I went to practice. I am finally doing gymnastics again and it was great fun. When I managed to get home at around 9 I had some dinner and I decided to call it a night because I was exhausted from my day and that flu shot was starting to get to me. Can't wait for the weekend!",
+        "score": 10,
+        "reason": "Видео полностью соответствует тематике повседневной жизни и рутины программиста, включая множество деталей рабочего дня разработчика программного обеспечения.",
+        "should_rewrite": true
+      },
+      {
+        "video_id": "rR4n-0KYeKQ",
+        "url": "https://www.youtube.com/shorts/rR4n-0KYeKQ",
+        "title": "how we write/review code in big tech companies",
+        "channel_title": "Joma Tech",
+        "duration": 59,
+        "theme": "Exploring the daily routines and experiences of software developers and programmers.",
+        "view_count": 15745642,
+        "outlier_score": 1.01,
+        "engagement_rate": null,
+        "transcript": "Shit. I have no idea what I'm doing. I have no idea what I'm reading. I have no idea what I'm doing.",
+        "score": 7,
+        "reason": "Видео обсуждает процесс написания и рецензирования кода, что касается повседневных обязанностей программистов и разработчиков, что соответствует запросам.",
+        "should_rewrite": true
+      },
+      {
+        "video_id": "8HgaEZhvcNk",
+        "url": "https://www.youtube.com/shorts/8HgaEZhvcNk",
+        "title": "A Day in a life of a software developer | graphics designer | short",
+        "channel_title": "Samson TM",
+        "duration": 19,
+        "theme": "Exploring the daily routines and experiences of software developers and programmers.",
+        "view_count": 94,
+        "outlier_score": 0,
+        "engagement_rate": null,
+        "transcript": "🎵",
+        "score": 8,
+        "reason": "Видеозаголовок четко указывает на повседневную жизнь разработчика программного обеспечения, что соответствует многим запросам.",
+        "should_rewrite": true
+      }
+    ]
+  },
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "1809b9fcd441a772a106b379d86fcc841673534ceae34f24046848ab288c4190"
+  }
+}

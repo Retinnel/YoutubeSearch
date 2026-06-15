@@ -1,0 +1,881 @@
+{
+  "nodes": [
+    {
+      "parameters": {
+        "updates": [
+          "message"
+        ],
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -496,
+        160
+      ],
+      "id": "b39751b7-0122-4893-870a-c9aaf87b8802",
+      "name": "Telegram Trigger",
+      "webhookId": "3dc6e27c-3051-4ad8-bfcc-8ad65415d0c4",
+      "credentials": {
+        "telegramApi": {
+          "id": "h6NFwBbwGH8W0Gzq",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-4o-mini",
+          "mode": "list",
+          "cachedResultName": "GPT-4O-MINI"
+        },
+        "responses": {
+          "values": [
+            {
+              "content": "=Есть поисковой запрос для ютуба - {{ $json.message.text }}. Сделай 5 похожих запросов на английском, чтобы увеличить покрытие поиска шортсов. Также верни поле \"theme\" с описанием тематики для последующей проверки релевантности."
+            },
+            {
+              "role": "system",
+              "content": "DO NOT use markdown. Answer ONLY with valid JSON like: {\"related_search_queries\": [\"query1\",\"query2\",\"query3\",\"query4\",\"query5\"], \"theme\": \"Brief description of the content niche in English\"}"
+            }
+          ]
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 2.1,
+      "position": [
+        96,
+        -48
+      ],
+      "id": "2e77223f-7ed5-4da8-a47d-38218f52500c",
+      "name": "Expand Queries (OpenAI)",
+      "credentials": {
+        "openAiApi": {
+          "id": "KZxAJ8AYqx7MCcim",
+          "name": "OpenAI account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const j = $input.all()[0].json;\nlet aiText = \"\";if (j.output && Array.isArray(j.output) && j.output[0].content && Array.isArray(j.output[0].content)) {\n    aiText = j.output[0].content[0].text || \"\";\n} else if (j.content && Array.isArray(j.content)) {\n    aiText = j.content[0]?.text || \"\";\n} else if (j.text) {\n    aiText = j.text;\n} else if (j.message?.content) {\n    aiText = j.message.content;\n}if (typeof aiText !== 'string') {\n    aiText = JSON.stringify(aiText || \"\");\n}let queries = [];\nlet theme = \"\";\nconst jsonMatch = aiText.match(/\\{[\\s\\S]*\\}/);if (jsonMatch) {\n    try {\n        const parsed = JSON.parse(jsonMatch[0]);\n        if (parsed.related_search_queries && Array.isArray(parsed.related_search_queries)) {\n            queries = parsed.related_search_queries;\n        } else {\n            for (const key in parsed) {\n                if (Array.isArray(parsed[key])) {\n                    queries = parsed[key];\n                    break;\n                }\n            }\n        }\n        theme = parsed.theme || \"\";\n    } catch(e) {\n        console.log(\"Ошибка парсинга списка запросов\");\n    }\n}\n\nif (queries.length === 0) {\n    queries = [\"IT outsourcing shorts\"];\n}\n\nreturn queries.map(q => ({ json: { query: q, theme: theme, all_queries: queries } }));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        64,
+        160
+      ],
+      "id": "74af43dd-d3e0-47d8-a01a-75cfe1b20c2e",
+      "name": "Parse Queries"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://youtube-api:8000/api/v1/search_shorts",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-KEY",
+              "value": "change_me_to_a_strong_secret"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\"query\": \"{{ $json.query }}\", \"max_results\": 5, \"min_views\": 0, \"min_outlier_score\": 0}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        320,
+        160
+      ],
+      "id": "44b39de3-d825-49a1-98a4-689255398ef4",
+      "name": "Search Shorts (FastAPI)"
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-4o-mini",
+          "mode": "list",
+          "cachedResultName": "GPT-4O-MINI"
+        },
+        "responses": {
+          "values": [
+            {
+              "role": "system",
+              "content": "=You are a content relevance analyst. The user is looking for YouTube Shorts about this theme: {{ $json.theme }}. Consider ALL search queries listed below when evaluating relevance — a video is relevant if it matches ANY of the queries, not just the one it was found under. Rate relevance 1-10. If transcript is unavailable, judge by title and channel name only. Return ONLY valid JSON, no markdown."
+            },
+            {
+              "content": "=Video title: {{ $json.title }}\nChannel: {{ $json.channel_title }}\nDuration: {{ $json.duration }}s\nOutlier score: {{ $json.outlier_score !== null ? $json.outlier_score + 'x (viral coefficient)' : 'unknown' }}\n\nAll search queries (evaluate against all of them): {{ $json.all_queries && $json.all_queries.length ? $json.all_queries.join(' | ') : $json.search_query }}\n\nTranscript: {{ $json.transcript ? $json.transcript : \"(unavailable)\" }}\n\nReturn JSON: {\"score\": <int 1-10>, \"reason\": \"<brief explanation in Russian>\", \"should_rewrite\": <true if score >= 7>}"
+            }
+          ]
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 2.1,
+      "position": [
+        1760,
+        -48
+      ],
+      "id": "4585de58-8d84-4158-8109-439121606f84",
+      "name": "Score Relevance (OpenAI)",
+      "credentials": {
+        "openAiApi": {
+          "id": "KZxAJ8AYqx7MCcim",
+          "name": "OpenAI account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// runOnceForAllItems: pairs LLM outputs with original shorts from Merge Transcript by index.\n// Handles both OpenAI node output and Google chainLlm output formats.\nconst llmOutputs = $input.all();\nconst shorts = $('Merge Transcript').all();\n\nreturn llmOutputs.map(function(item, i) {\n    const j = item.json;\n    const short = shorts[i] ? shorts[i].json : {};\n\n    // Extract text from various LLM output structures\n    let aiText = '';\n    if (j.output && Array.isArray(j.output) && j.output[0]?.content && Array.isArray(j.output[0].content)) {\n        // OpenAI node format\n        aiText = j.output[0].content[0].text || '';\n    } else if (j.content && Array.isArray(j.content)) {\n        aiText = j.content[0]?.text || '';\n    } else if (j.text) {\n        // chainLlm (Google Gemini) format\n        aiText = j.text;\n    } else if (j.message?.content) {\n        aiText = j.message.content;\n    }\n\n    if (typeof aiText !== 'string') {\n        aiText = JSON.stringify(aiText || '');\n    }\n\n    let score = {};\n    const match = aiText.match(/\\{[\\s\\S]*\\}/);\n    if (match) {\n        try { score = JSON.parse(match[0]); } catch(e) {}\n    }\n\n    return {\n        json: {\n            video_id: short.video_id || '',\n            url: short.url || '',\n            title: short.title || '',\n            channel_title: short.channel_title || '',\n            duration: short.duration || null,\n            theme: short.theme || '',\n            view_count: short.view_count || null,\n            outlier_score: short.outlier_score !== undefined ? short.outlier_score : null,\n            engagement_rate: short.engagement_rate !== undefined ? short.engagement_rate : null,\n            transcript: short.transcript || null,\n            score: typeof score.score === 'number' ? score.score : 0,\n            reason: score.reason || '',\n            should_rewrite: score.should_rewrite === true\n        }\n    };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2000,
+        160
+      ],
+      "id": "2c0c82e9-e195-405c-8ebb-1cb82b861d64",
+      "name": "Parse Score"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "filter-score-1",
+              "leftValue": "={{ $json.score }}",
+              "rightValue": 7,
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2.3,
+      "position": [
+        2240,
+        160
+      ],
+      "id": "cd34f5b3-b93e-40fd-a1ed-bf35e3622a84",
+      "name": "Filter Score >= 7"
+    },
+    {
+      "parameters": {
+        "fieldsToAggregate": {
+          "fieldToAggregate": [
+            {
+              "fieldToAggregate": "video_id"
+            },
+            {
+              "fieldToAggregate": "url"
+            },
+            {
+              "fieldToAggregate": "title"
+            },
+            {
+              "fieldToAggregate": "channel_title"
+            },
+            {
+              "fieldToAggregate": "duration"
+            },
+            {
+              "fieldToAggregate": "score"
+            },
+            {
+              "fieldToAggregate": "reason"
+            },
+            {
+              "fieldToAggregate": "theme"
+            },
+            {
+              "fieldToAggregate": "view_count"
+            },
+            {
+              "fieldToAggregate": "transcript"
+            },
+            {
+              "fieldToAggregate": "transcript_source"
+            },
+            {
+              "fieldToAggregate": "outlier_score"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.aggregate",
+      "typeVersion": 1,
+      "position": [
+        2960,
+        160
+      ],
+      "id": "2f36b04d-a99a-46c3-aabb-d0966c40b36d",
+      "name": "Aggregate Results"
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.all()[0]?.json;if (!data || !data.title || data.title.length === 0) {\n    return [{ json: { text: \"🔍 Релевантных шортсов по заданной тематике не найдено 😔\" } }];\n}\nconst messages = [];\nlet part = 1;\nlet currentMessage = `🎥 *Найдены релевантные шортсы! (Часть ${part})*\\n\\n`;\nfor (let i = 0; i < data.title.length; i++) {\n    const title = String(data.title[i]).replace(/[*_\\[\\]`]/g, '').substring(0, 80);\n    const url = data.url[i];\n    const score = data.score[i];\n    const reason = String(data.reason[i] || '').replace(/[*_\\[\\]`]/g, '').substring(0, 180);\n    const channel = String(data.channel_title[i] || 'Unknown').replace(/[*_\\[\\]`]/g, '');\n    const duration = data.duration[i];\n    const views = data.view_count && data.view_count[i] ? Number(data.view_count[i]).toLocaleString('ru-RU') : '?';\n    const outlier = data.outlier_score && data.outlier_score[i] ? ` | 📈 ${data.outlier_score[i]}x` : '';\n    const block = `✅ *${title}*\\n📺 ${channel} | ⏱ ${duration}s | 👁 ${views}${outlier} | 🎯 ${score}/10\\n🔗 ${url}\\n💬 ${reason}\\n\\n`;\n    if ((currentMessage.length + block.length) > 3800) {\n        messages.push({ json: { text: currentMessage } });\n        part++;\n        currentMessage = `🎥 *Продолжение (Часть ${part}):*\\n\\n`;\n    }\n    currentMessage += block;\n}\nif (currentMessage.replace(/\\*.*?\\*/g, '').trim().length > 0) {\n    messages.push({ json: { text: currentMessage } });\n}\nreturn messages;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3200,
+        160
+      ],
+      "id": "216c7424-4988-43e2-abdd-fe44dfe33fef",
+      "name": "Format Telegram Message"
+    },
+    {
+      "parameters": {
+        "chatId": "909658267",
+        "text": "={{ $json.text }}",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        3440,
+        160
+      ],
+      "id": "abbd136b-59c5-49c6-9a1a-a4774ce883fc",
+      "name": "Send to Telegram",
+      "webhookId": "5f6ea418-e99b-4b43-bd3c-6b5b5c6ef572",
+      "credentials": {
+        "telegramApi": {
+          "id": "h6NFwBbwGH8W0Gzq",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// runOnceForAllItems: receives all HTTP responses at once\n// One item per query -> we enrich each and return N items for Split Out\n//\n// === LLM PROVIDER SWITCH ===\n// Change LLM_PROVIDER below to switch between \"openai\" and \"google\" for scoring.\nconst LLM_PROVIDER = $('Config').first().json.llm_provider || \"google\";const allItems = $input.all();\nconst theme = $('Parse Queries').first().json.theme || '';\n// Collect all search queries expanded by the LLM (shared across all branches)\nconst all_queries = $('Parse Queries').all().map(item => item.json.query).filter(Boolean);const results = [];\nfor (const item of allItems) {\n    const data = item.json;\n    const query = data.query || '';    const enrichedShorts = (data.shorts || []).map(function(s) {\n        return {\n            video_id: s.video_id || '',\n            url: s.url || '',\n            title: s.title || 'No title',\n            channel_id: s.channel_id || null,\n            channel_title: s.channel_title || null,\n            duration: s.duration || null,\n            search_query: query,\n            theme: theme,\n            all_queries: all_queries,\n            view_count: s.view_count || null,\n            outlier_score: s.outlier_score !== undefined ? s.outlier_score : null,\n            engagement_rate: s.engagement_rate !== undefined ? s.engagement_rate : null,\n            llm_provider: LLM_PROVIDER\n        };\n    });    results.push({ json: { shorts: enrichedShorts } });\n}return results.length > 0 ? results : [{ json: { shorts: [] } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        560,
+        160
+      ],
+      "id": "7e3053bc-1369-4dfd-ab86-2a59e9a3759c",
+      "name": "Enrich Shorts"
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "shorts",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        800,
+        160
+      ],
+      "id": "983e1b5e-f1bb-4007-b090-dbec6f6e2d8e",
+      "name": "Split Shorts"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://youtube-api:8000/api/v1/get_transcript",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-KEY",
+              "value": "change_me_to_a_strong_secret"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\"video_id\": \"{{ $json.video_id }}\"}",
+        "options": {
+          "timeout": 600000,
+          "requestTimeout": 600000,
+          "responseTimeout": 600000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        1040,
+        160
+      ],
+      "id": "363950fb-1126-464a-9fdb-3ef23e0076c3",
+      "name": "Get Transcript (FastAPI)"
+    },
+    {
+      "parameters": {
+        "jsCode": "// runOnceForAllItems: pairs transcript responses with original shorts by index.\n// HTTP Request preserves order, so index i in transcripts == index i in Split Shorts.\nconst transcripts = $input.all();\nconst shorts = $('Split Shorts').all();return transcripts.map(function(item, i) {\n    const short = shorts[i] ? shorts[i].json : {};\n    const t = item.json;\n    return {\n        json: {\n            video_id: short.video_id || '',\n            url: short.url || '',\n            title: short.title || 'No title',\n            channel_id: short.channel_id || null,\n            channel_title: short.channel_title || null,\n            duration: short.duration || null,\n            search_query: short.search_query || '',\n            theme: short.theme || '',\n            all_queries: short.all_queries || [],\n            view_count: short.view_count || null,\n            outlier_score: short.outlier_score !== undefined ? short.outlier_score : null,\n            engagement_rate: short.engagement_rate !== undefined ? short.engagement_rate : null,\n            llm_provider: short.llm_provider || 'openai',\n            transcript: t.transcript || null,\n            transcript_source: t.source || null,\n            transcript_error: t.error || null\n        }\n    };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1280,
+        160
+      ],
+      "id": "968a1c58-eb11-4204-b525-9fc57fda55aa",
+      "name": "Merge Transcript"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.llm_provider }}",
+                    "rightValue": "openai",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        1520,
+        160
+      ],
+      "id": "d3ded4d8-a6ce-4e75-8b29-6df7b7ead887",
+      "name": "LLM Router"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=You are a content relevance analyst. The user is looking for YouTube Shorts about this theme: {{ $json.theme }}.\nConsider ALL search queries listed below when evaluating relevance — a video is relevant if it matches ANY of the queries, not just the one it was found under.\n\nVideo title: {{ $json.title }}\nChannel: {{ $json.channel_title }}\nDuration: {{ $json.duration }}s\nOutlier score: {{ $json.outlier_score !== null ? $json.outlier_score + 'x (viral coefficient)' : 'unknown' }}\n\nAll search queries (evaluate against all of them): {{ $json.all_queries && $json.all_queries.length ? $json.all_queries.join(' | ') : $json.search_query }}\n\nTranscript: {{ $json.transcript ? $json.transcript : \"(unavailable)\" }}\n\nRate relevance 1-10. If transcript is unavailable, judge by title and channel name only.\nReturn ONLY valid JSON, no markdown:\n{\"score\": <int 1-10>, \"reason\": \"<brief explanation in Russian>\", \"should_rewrite\": <true if score >= 7>}"
+      },
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.5,
+      "position": [
+        1760,
+        352
+      ],
+      "id": "b9c009dc-7446-4cc4-a168-9547dd1f2135",
+      "name": "Score Relevance (Google)"
+    },
+    {
+      "parameters": {
+        "modelName": {
+          "__rl": true,
+          "value": "models/gemini-2.0-flash",
+          "mode": "list",
+          "cachedResultName": "models/gemini-2.0-flash"
+        },
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1,
+      "position": [
+        1760,
+        560
+      ],
+      "id": "1463d100-d6b9-4c48-89f9-b09fea7a8644",
+      "name": "Google Gemini Model"
+    },
+    {
+      "parameters": {
+        "jsCode": "// =============================================\n// LLM PROVIDER SWITCH - change value here only\n// 'google' = Google Gemini (default)\n// 'openai' = OpenAI GPT-4o-mini\n// =============================================\nconst LLM_PROVIDER = \"openai\";\n\n// =============================================\n// FORCE WHISPER AFTER FILTER\n// true  = re-transcribe high-scoring videos with Whisper (better quality, slower)\n//         Requires: WHISPER_ENABLED=true in .env and openai-whisper installed\n// false = keep the transcript already obtained during the initial pipeline step\n// =============================================\nconst FORCE_WHISPER_AFTER_FILTER = true;\n\nconst items = $input.all();\nreturn items.map(function(item) {\n    return { json: Object.assign({}, item.json, {\n        llm_provider: LLM_PROVIDER,\n        force_whisper_after_filter: FORCE_WHISPER_AFTER_FILTER\n    }) };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -320,
+        160
+      ],
+      "id": "c558215b-76f2-47eb-9ca7-20605840cdfb",
+      "name": "Config"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.llm_provider }}",
+                    "operator": {
+                      "operation": "equals",
+                      "type": "string"
+                    },
+                    "rightValue": "openai"
+                  }
+                ],
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                }
+              }
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        -112,
+        160
+      ],
+      "id": "8f07d096-f222-48af-bae9-c390fec2fb78",
+      "name": "Expand Queries Router"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Есть поисковой запрос для ютуба - {{ $json.message.text }}. Сделай 5 похожих запросов на английском, чтобы увеличить покрытие поиска шортсов. Также верни поле \"theme\" с описанием тематики для последующей проверки релевантности. DO NOT use markdown. Answer ONLY with valid JSON like: {\"related_search_queries\": [\"query1\",\"query2\",\"query3\",\"query4\",\"query5\"], \"theme\": \"Brief description of the content niche in English\"}"
+      },
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.5,
+      "position": [
+        96,
+        352
+      ],
+      "id": "645a557a-5d16-4a8e-a729-fb559f72a8b7",
+      "name": "Expand Queries (Google)"
+    },
+    {
+      "parameters": {
+        "modelName": {
+          "__rl": true,
+          "value": "models/gemini-2.0-flash",
+          "mode": "list",
+          "cachedResultName": "Gemini 2.0 Flash"
+        },
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1,
+      "position": [
+        96,
+        576
+      ],
+      "id": "da5741aa-b0ea-49ad-8ddc-9b7bc74e83f8",
+      "name": "Google Gemini Model (Expand)"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://youtube-api:8000/api/v1/get_transcript",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-KEY",
+              "value": "change_me_to_a_strong_secret"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\"video_id\": \"{{ $json.video_id }}\", \"force_whisper\": {{ $(\"Config\").first().json.force_whisper_after_filter ? \"true\" : \"false\" }}}",
+        "options": {
+          "timeout": 600000,
+          "requestTimeout": 600000,
+          "responseTimeout": 600000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        2480,
+        160
+      ],
+      "id": "6f29faa7-f9fa-4fe4-91af-2a9e86127dec",
+      "name": "Force Transcribe (Whisper)",
+      "notes": "Re-transcribes high-scoring videos with Whisper for better quality. Enable WHISPER_ENABLED=true in .env."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Merge Whisper transcript results back into the scored Short items.\n// If Whisper succeeded, replace the transcript; otherwise keep the original.\nconst whisperResults = $input.all();\nconst filtered = $('Filter Score >= 7').all();\n\nreturn whisperResults.map(function(item, i) {\n    const original = filtered[i] ? filtered[i].json : {};\n    const w = item.json;\n    const newTranscript = w.transcript || null;\n    return {\n        json: Object.assign({}, original, {\n            transcript: newTranscript || original.transcript,\n            transcript_source: newTranscript ? (w.source || 'whisper') : original.transcript_source,\n            whisper_error: w.error || null\n        })\n    };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2720,
+        160
+      ],
+      "id": "1feeb8cb-d539-48ce-98d3-98c4b2bb8f89",
+      "name": "Update Whisper Transcript"
+    },
+    {
+      "parameters": {
+        "jsCode": "\n// Build a UTF-8 text file with all transcripts and attach it as binary data.\nconst data = $input.all()[0]?.json;\n\nif (!data || !data.title || !data.title.length) {\n    const empty = Buffer.from('Нет результатов для транскрипции.', 'utf-8').toString('base64');\n    return [{\n        json: { caption: '📄 Транскрипций нет' },\n        binary: { transcript_file: { data: empty, mimeType: 'text/plain', fileName: 'transcripts.txt' } }\n    }];\n}\n\nconst now = new Date().toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' });\nconst theme = (data.theme && data.theme[0]) ? data.theme[0] : '—';\nconst lines = [];\n\nlines.push('ТРАНСКРИПЦИИ РЕЛЕВАНТНЫХ YOUTUBE SHORTS');\nlines.push('='.repeat(60));\nlines.push('Дата поиска: ' + now);\nlines.push('Тема: ' + theme);\nlines.push('Найдено видео: ' + data.title.length);\nlines.push('='.repeat(60));\nlines.push('');\n\nfor (let i = 0; i < data.title.length; i++) {\n    lines.push('[' + (i + 1) + '] ' + (data.title[i] || '—'));\n    lines.push('    Канал:   ' + (data.channel_title?.[i] || '—'));\n    lines.push('    Ссылка:  ' + (data.url?.[i] || '—'));\n    lines.push('    Длина:   ' + (data.duration?.[i] || '?') + 's');\n    lines.push('    Оценка:  ' + (data.score?.[i] || '?') + '/10');\n    const outlier = data.outlier_score?.[i];\n    if (outlier) lines.push('    Вирал.:  ' + outlier + 'x');\n    lines.push('    Причина: ' + (data.reason?.[i] || '—'));\n    lines.push('    Источник транскрипции: ' + (data.transcript_source?.[i] || '—'));\n    lines.push('');\n    lines.push('    --- ТРАНСКРИПЦИЯ ---');\n\n    const transcript = data.transcript?.[i];\n    if (transcript && transcript.trim()) {\n        // Word-wrap at ~80 chars\n        const words = transcript.trim().split(/\\s+/);\n        let line = '    ';\n        for (const word of words) {\n            if (line.length + word.length + 1 > 84) {\n                lines.push(line.trimEnd());\n                line = '    ' + word + ' ';\n            } else {\n                line += word + ' ';\n            }\n        }\n        if (line.trim()) lines.push(line.trimEnd());\n    } else {\n        lines.push('    (транскрипция недоступна)');\n    }\n\n    lines.push('');\n    lines.push('-'.repeat(60));\n    lines.push('');\n}\n\nconst content = lines.join('\\n');\nconst base64 = Buffer.from(content, 'utf-8').toString('base64');\nconst dateStr = new Date().toISOString().slice(0, 10);\n\nreturn [{\n    json: { caption: '\\uD83D\\uDCCB Транскрипции: ' + data.title.length + ' видео по теме: ' + theme },\n    binary: {\n        transcript_file: {\n            data: base64,\n            mimeType: 'text/plain',\n            fileName: 'transcripts_' + dateStr + '.txt',\n        }\n    }\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2960,
+        400
+      ],
+      "id": "a7c4b272-f170-46c6-8265-1c791e21769e",
+      "name": "Build Transcript File"
+    },
+    {
+      "parameters": {
+        "operation": "sendDocument",
+        "chatId": "909658267",
+        "binaryData": true,
+        "binaryPropertyName": "transcript_file",
+        "additionalFields": {
+          "caption": "={{ $json.caption }}"
+        }
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1,
+      "position": [
+        3200,
+        400
+      ],
+      "id": "d2f62bec-a4b4-4486-a11b-0f99d305cf3c",
+      "name": "Send Transcript File",
+      "webhookId": "7f47915b-1685-4ca2-a88d-463561cddd07",
+      "credentials": {
+        "telegramApi": {
+          "id": "h6NFwBbwGH8W0Gzq",
+          "name": "Telegram account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Expand Queries (OpenAI)": {
+      "main": [
+        [
+          {
+            "node": "Parse Queries",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Queries": {
+      "main": [
+        [
+          {
+            "node": "Search Shorts (FastAPI)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search Shorts (FastAPI)": {
+      "main": [
+        [
+          {
+            "node": "Enrich Shorts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Score Relevance (OpenAI)": {
+      "main": [
+        [
+          {
+            "node": "Parse Score",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Score": {
+      "main": [
+        [
+          {
+            "node": "Filter Score >= 7",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Score >= 7": {
+      "main": [
+        [
+          {
+            "node": "Force Transcribe (Whisper)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate Results": {
+      "main": [
+        [
+          {
+            "node": "Format Telegram Message",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Build Transcript File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Telegram Message": {
+      "main": [
+        [
+          {
+            "node": "Send to Telegram",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enrich Shorts": {
+      "main": [
+        [
+          {
+            "node": "Split Shorts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Shorts": {
+      "main": [
+        [
+          {
+            "node": "Get Transcript (FastAPI)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Transcript (FastAPI)": {
+      "main": [
+        [
+          {
+            "node": "Merge Transcript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Transcript": {
+      "main": [
+        [
+          {
+            "node": "LLM Router",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM Router": {
+      "main": [
+        [
+          {
+            "node": "Score Relevance (OpenAI)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Score Relevance (Google)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Score Relevance (Google)": {
+      "main": [
+        [
+          {
+            "node": "Parse Score",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Gemini Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Score Relevance (Google)",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Expand Queries Router",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Expand Queries Router": {
+      "main": [
+        [
+          {
+            "node": "Expand Queries (OpenAI)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Expand Queries (Google)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Expand Queries (Google)": {
+      "main": [
+        [
+          {
+            "node": "Parse Queries",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Gemini Model (Expand)": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Expand Queries (Google)",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Force Transcribe (Whisper)": {
+      "main": [
+        [
+          {
+            "node": "Update Whisper Transcript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Whisper Transcript": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Transcript File": {
+      "main": [
+        [
+          {
+            "node": "Send Transcript File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "instanceId": "1809b9fcd441a772a106b379d86fcc841673534ceae34f24046848ab288c4190"
+  }
+}

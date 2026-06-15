@@ -7,6 +7,11 @@ WORKDIR /app
 # - nodejs: needed for yt-dlp to solve YouTube's n-challenge (otherwise many formats are missing)
 # - libgomp1: required by CTranslate2 (faster-whisper's inference backend)
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    gnupg \
+    ca-certificates \
+    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends \
     ffmpeg \
     nodejs \
     libgomp1 \
