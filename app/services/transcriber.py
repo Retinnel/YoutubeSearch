@@ -600,6 +600,29 @@ def _parse_vtt(path: str) -> str:
     return " ".join(lines)
 
 
+from datetime import datetime
+
+def _save_transcript_to_disk(tr: TranscriptResponse) -> str | None:
+    """Persist transcript response to disk (JSON). Returns path or None."""
+    try:
+        from app.config import settings
+        dirpath = getattr(settings, "transcripts_dir", "/app/logs/transcripts")
+        os.makedirs(dirpath, exist_ok=True)
+        ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+        src = tr.source or "none"
+        fname = f"{tr.video_id}_{src}_{ts}.json"
+        path = os.path.join(dirpath, fname)
+        payload = tr.model_dump() if hasattr(tr, "model_dump") else tr.dict()
+        payload["saved_at"] = ts
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        log.info(f"Saved transcript to {path}")
+        return path
+    except Exception as exc:
+        log.warning(f"Failed to save transcript to disk: {exc}")
+        return None
+
+
 def _get_transcript_sync(video_id: str, language: str, use_whisper: bool = False, force_whisper: bool = False, cookies_file: str = "") -> TranscriptResponse:
     url = f"https://www.youtube.com/shorts/{video_id}"
 
@@ -612,7 +635,9 @@ def _get_transcript_sync(video_id: str, language: str, use_whisper: bool = False
             text, lang = result
             ok, reason = is_usable_transcript(text)
             log.info(f"Transcript OK (openai) | video_id={video_id} | lang={lang} | chars={len(text)} | quality={reason}")
-            return TranscriptResponse(video_id=video_id, url=url, transcript=text, language=lang, source="openai")
+            tr = TranscriptResponse(video_id=video_id, url=url, transcript=text, language=lang, source="openai")
+            _save_transcript_to_disk(tr)
+            return tr
 
     if not force_whisper:
         # 1. Fast path via youtube-transcript-api
@@ -621,7 +646,9 @@ def _get_transcript_sync(video_id: str, language: str, use_whisper: bool = False
             text, lang = result
             ok, reason = is_usable_transcript(text)
             log.info(f"Transcript OK (api) | video_id={video_id} | lang={lang} | chars={len(text)} | quality={reason}")
-            return TranscriptResponse(video_id=video_id, url=url, transcript=text, language=lang, source="api")
+            tr = TranscriptResponse(video_id=video_id, url=url, transcript=text, language=lang, source="api")
+            _save_transcript_to_disk(tr)
+            return tr
 
         # 2. Fallback: yt-dlp subtitles
         log.debug(f"Falling back to yt-dlp subtitles | video_id={video_id}")
@@ -630,7 +657,9 @@ def _get_transcript_sync(video_id: str, language: str, use_whisper: bool = False
             text, lang = result
             ok, reason = is_usable_transcript(text)
             log.info(f"Transcript OK (yt-dlp) | video_id={video_id} | lang={lang} | chars={len(text)} | quality={reason}")
-            return TranscriptResponse(video_id=video_id, url=url, transcript=text, language=lang, source="yt-dlp")
+            tr = TranscriptResponse(video_id=video_id, url=url, transcript=text, language=lang, source="yt-dlp")
+            _save_transcript_to_disk(tr)
+            return tr
 
     # 3. Whisper: forced (skip YouTube captions) or fallback
     if use_whisper or force_whisper:
@@ -643,7 +672,9 @@ def _get_transcript_sync(video_id: str, language: str, use_whisper: bool = False
             text, lang = result
             ok, reason = is_usable_transcript(text)
             log.info(f"Transcript OK (whisper) | video_id={video_id} | lang={lang} | chars={len(text)} | quality={reason}")
-            return TranscriptResponse(video_id=video_id, url=url, transcript=text, language=lang, source="whisper")
+            tr = TranscriptResponse(video_id=video_id, url=url, transcript=text, language=lang, source="whisper")
+            _save_transcript_to_disk(tr)
+            return tr
 
     # All methods failed
     if force_whisper:
@@ -653,7 +684,9 @@ def _get_transcript_sync(video_id: str, language: str, use_whisper: bool = False
     else:
         msg = "No transcript available (API and yt-dlp both failed)"
     log.warning(f"Transcript FAILED | video_id={video_id} | {msg}")
-    return TranscriptResponse(video_id=video_id, url=url, transcript=None, error=msg)
+    tr = TranscriptResponse(video_id=video_id, url=url, transcript=None, error=msg)
+    _save_transcript_to_disk(tr)
+    return tr
 
 
 
