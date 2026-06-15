@@ -331,7 +331,7 @@ def _download_audio(video_id: str, tmp_dir: str, cookies_file: str = "") -> str 
     dl_opts = {
         "quiet": True,
         "no_warnings": True,
-        "format": "worstaudio/worst",
+        "format": "bestaudio/best",
         "outtmpl": os.path.join(tmp_dir, f"{video_id}.%(ext)s"),
         "postprocessors": [{
             "key": "FFmpegExtractAudio",
