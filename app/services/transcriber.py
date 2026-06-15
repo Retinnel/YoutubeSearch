@@ -33,6 +33,7 @@ from typing import Optional
 
 import yt_dlp
 from requests import Session
+import httpx
 from youtube_transcript_api import YouTubeTranscriptApi
 
 from app.models import TranscriptResponse
@@ -405,6 +406,53 @@ def _get_via_groq(video_id: str, audio_path: str, language: Optional[str] = None
         return None
 
 
+def _get_via_openai(video_id: str, audio_path: str, language: Optional[str] = None) -> tuple[str, str] | None:
+    """
+    Transcribe audio using OpenAI Whisper API (whisper-1).
+    Returns (text, language) or None on failure.
+    """
+    from app.config import settings
+    if not getattr(settings, "openai_key", ""):
+        return None
+    try:
+        headers = {"Authorization": f"Bearer {settings.openai_key}"}
+        data = {"model": "whisper-1"}
+        if language:
+            data["language"] = language
+        with open(audio_path, "rb") as f:
+            files = {"file": (os.path.basename(audio_path), f, "application/octet-stream")}
+            with httpx.Client(timeout=120.0) as client:
+                resp = client.post("https://api.openai.com/v1/audio/transcriptions", headers=headers, data=data, files=files)
+        if resp.status_code == 200:
+            try:
+                j = resp.json()
+                text = j.get("text") if isinstance(j, dict) else str(resp.text)
+            except Exception:
+                text = resp.text or ""
+            if text:
+                detected_lang = language or "unknown"
+                log.info(f"OpenAI Whisper: OK | video_id={video_id} | chars={len(text)}")
+                return text, detected_lang
+            log.warning(f"OpenAI Whisper: empty response | video_id={video_id}")
+            return None
+        else:
+            log.warning(f"OpenAI Whisper: error | video_id={video_id} | status={resp.status_code} | {resp.text}")
+            return None
+    except Exception as exc:
+        log.warning(f"OpenAI Whisper: exception | video_id={video_id} | {exc}")
+        return None
+
+
+def _get_via_openai_full(video_id: str, language: Optional[str] = None, cookies_file: str = "") -> tuple[str, str] | None:
+    """Download audio and transcribe via OpenAI Whisper API."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        audio_path = _download_audio(video_id, tmp_dir, cookies_file=cookies_file)
+        if not audio_path:
+            log.warning(f"OpenAI Whisper: audio file not found after download | video_id={video_id}")
+            return None
+        return _get_via_openai(video_id, audio_path, language)
+
+
 def _get_via_local_whisper(video_id: str, audio_path: str, language: Optional[str] = None) -> tuple[str, str] | None:
     """
     Transcribe audio using local faster-whisper model.
@@ -467,7 +515,7 @@ def _get_via_local_whisper(video_id: str, audio_path: str, language: Optional[st
 def _get_via_whisper(video_id: str, language: Optional[str] = None, cookies_file: str = "") -> tuple[str, str] | None:
     """
     Transcribe YouTube Shorts audio.
-    Priority: Groq cloud API (if GROQ_API_KEY set) → local faster-whisper.
+    Priority: OpenAI (if OPENAI_KEY set and PREFER_OPENAI=true) → Groq cloud API (if GROQ_API_KEY set) → local faster-whisper.
     Returns (text, language) or None on failure.
     """
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -476,15 +524,30 @@ def _get_via_whisper(video_id: str, language: Optional[str] = None, cookies_file
             log.warning(f"Whisper: audio file not found after download | video_id={video_id}")
             return None
 
-        # Try Groq first (best quality, free)
         from app.config import settings
+
+        # 1) If OpenAI is configured and preferred, try it first
+        if getattr(settings, "openai_key", "") and getattr(settings, "openai_prefer", False):
+            result = _get_via_openai(video_id, audio_path, language)
+            if result:
+                return result
+            log.info(f"OpenAI Whisper failed, falling back to Groq/local Whisper | video_id={video_id}")
+
+        # 2) Try Groq (best quality cloud option) if configured
         if settings.groq_api_key:
             result = _get_via_groq(video_id, audio_path, language)
             if result:
                 return result
             log.info(f"Groq failed, falling back to local Whisper | video_id={video_id}")
 
-        # Local faster-whisper fallback
+        # 3) If OpenAI is configured but not preferred, try it now
+        if getattr(settings, "openai_key", "") and not getattr(settings, "openai_prefer", False):
+            result = _get_via_openai(video_id, audio_path, language)
+            if result:
+                return result
+            log.info(f"OpenAI Whisper failed, falling back to local Whisper | video_id={video_id}")
+
+        # 4) Local faster-whisper fallback
         return _get_via_local_whisper(video_id, audio_path, language)
 
 
@@ -519,6 +582,17 @@ def _parse_vtt(path: str) -> str:
 
 def _get_transcript_sync(video_id: str, language: str, use_whisper: bool = False, force_whisper: bool = False, cookies_file: str = "") -> TranscriptResponse:
     url = f"https://www.youtube.com/shorts/{video_id}"
+
+    # Allow global preference for OpenAI Whisper (try it before caption-based methods)
+    from app.config import settings
+    if not force_whisper and getattr(settings, "openai_key", "") and getattr(settings, "openai_prefer", False):
+        log.info(f"Prefer OpenAI Whisper: trying OpenAI transcription first | video_id={video_id}")
+        result = _get_via_openai_full(video_id, language if language != "en" else None, cookies_file=cookies_file)
+        if result:
+            text, lang = result
+            ok, reason = is_usable_transcript(text)
+            log.info(f"Transcript OK (openai) | video_id={video_id} | lang={lang} | chars={len(text)} | quality={reason}")
+            return TranscriptResponse(video_id=video_id, url=url, transcript=text, language=lang, source="openai")
 
     if not force_whisper:
         # 1. Fast path via youtube-transcript-api
