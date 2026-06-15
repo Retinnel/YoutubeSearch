@@ -57,6 +57,15 @@ _MIN_UNIQUE_WORD_SHARE = 0.45
 _GARBAGE_MARKERS = ["traceback", "file \"<string>\"", "unicodeencodeerror", "exception", "error:"]
 
 
+from concurrent.futures import ThreadPoolExecutor
+import asyncio
+
+# Создаем пул с 1 потоком. 
+# Почему 1? Потому что Whisper (особенно на GPU) потребляет очень много памяти.
+# Если запустить 2-3 задачи параллельно, вы получите OutOfMemory (OOM) ошибку.
+transcript_executor = ThreadPoolExecutor(max_workers=1)
+
+
 def _transcript_words(text: str) -> list[str]:
     return re.findall(r"[A-Za-zА-Яа-яЁё]{2,}", text.lower())
 
@@ -415,7 +424,22 @@ def _get_via_local_whisper(video_id: str, audio_path: str, language: Optional[st
         model = None
         for compute_type in ("int8", "float32"):
             try:
-                model = WhisperModel(model_name, device="cpu", compute_type=compute_type)
+                #model = WhisperModel(model_name, device="cpu", compute_type=compute_type)
+
+                try:
+                    # Теперь принудительно используем CUDA
+                    model = WhisperModel(
+                        model_name, 
+                        device="cuda", 
+                        compute_type="float16" # float16 работает быстрее и потребляет меньше VRAM на GPU
+                        )
+                    log.info(f"Whisper: loaded model={model_name} on GPU (cuda)")
+                except Exception as load_exc:
+                    log.warning(f"Whisper: GPU initialization failed ({load_exc}), falling back to CPU")
+                    model = WhisperModel(model_name, device="cpu", compute_type=compute_type, num_workers=2)
+
+
+
                 log.debug(f"Whisper: loaded model={model_name} compute_type={compute_type}")
                 break
             except Exception as load_exc:
@@ -538,7 +562,7 @@ def _get_transcript_sync(video_id: str, language: str, use_whisper: bool = False
     return TranscriptResponse(video_id=video_id, url=url, transcript=None, error=msg)
 
 
-async def get_transcript(video_id: str, language: str = "en", use_whisper: bool = False, force_whisper: bool = False, cookies_file: str = "") -> TranscriptResponse:
+#async def get_transcript(video_id: str, language: str = "en", use_whisper: bool = False, force_whisper: bool = False, cookies_file: str = "") -> TranscriptResponse:
     """
     Async entry point for transcript retrieval.
     Tries youtube-transcript-api first, falls back to yt-dlp subtitles,
@@ -551,5 +575,16 @@ async def get_transcript(video_id: str, language: str = "en", use_whisper: bool 
         None, _get_transcript_sync, video_id, language, use_whisper, force_whisper, cookies_file
     )
 
-
+async def get_transcript(video_id: str, language: str = "en", use_whisper: bool = False, force_whisper: bool = False, cookies_file: str = "") -> TranscriptResponse:
+    """
+    Async entry point for transcript retrieval.
+    """
+    loop = asyncio.get_running_loop() # Берем текущий запущенный цикл
+    
+    # Передаем наш `transcript_executor` в run_in_executor
+    return await loop.run_in_executor(
+        transcript_executor, 
+        _get_transcript_sync, 
+        video_id, language, use_whisper, force_whisper, cookies_file
+    )
 
