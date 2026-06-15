@@ -340,7 +340,7 @@ def _download_audio(video_id: str, tmp_dir: str, cookies_file: str = "") -> str 
         }],
         "socket_timeout": 30,
         "retries": 1,
-        "js_runtimes": ["nodejs"],  # for n-challenge solving
+        "js_runtimes": {"node": {}},  # for n-challenge solving
     }
     if cookies_file and os.path.isfile(cookies_file):
         # Copy to writable temp path (source may be read-only in Docker)
