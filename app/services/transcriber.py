@@ -343,7 +343,7 @@ def _download_audio(video_id: str, tmp_dir: str, cookies_file: str = "") -> str 
         "js_runtimes": {"node": {}},  # for n-challenge solving
     }
 
-    player_clients = [None, "web", "android", "tv"]
+    player_clients = [None, "web", "android", "tv", "ios"]
     formats_to_try = ["bestaudio/best", "bestaudio", "best"]
 
     for fmt in formats_to_try:

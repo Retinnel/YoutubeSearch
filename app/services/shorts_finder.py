@@ -26,8 +26,6 @@ _BASE_OPTS: dict[str, Any] = {
 
 def _build_search_url(query: str, max_results: int) -> str:
     """Build a yt-dlp search URL that returns videos."""
-    # Using "shorts" as a keyword (not hashtag) works more reliably across niches.
-    # #shorts hashtag causes YouTube to return 0 results for many topics.
     return f"ytsearch{max_results}:{query} shorts"
 
 
@@ -61,6 +59,8 @@ def _entry_to_short_meta(entry: dict[str, Any], avg_views: float = 0.0) -> Short
     comment_count_raw = entry.get("comment_count")
     comment_int = int(comment_count_raw) if comment_count_raw is not None else None
 
+    description = entry.get("description")
+
     # Engagement rate: (likes + comments) / views * 100
     engagement_rate: Optional[float] = None
     if view_int and view_int > 0:
@@ -72,7 +72,8 @@ def _entry_to_short_meta(entry: dict[str, Any], avg_views: float = 0.0) -> Short
 
     return ShortMeta(
         video_id=video_id,
-        url=f"https://www.youtube.com/shorts/{video_id}",
+        #url=f"https://www.youtube.com/shorts/{video_id}",
+        url=f"https://www.youtube.com/watch?v={video_id}",
         title=entry.get("title") or "No title",
         channel_id=entry.get("channel_id") or entry.get("uploader_id"),
         channel_title=entry.get("channel") or entry.get("uploader"),
@@ -81,6 +82,7 @@ def _entry_to_short_meta(entry: dict[str, Any], avg_views: float = 0.0) -> Short
         like_count=like_int,
         outlier_score=outlier_score,
         engagement_rate=engagement_rate,
+        description=description, 
     )
 
 
@@ -102,6 +104,7 @@ def _search_sync(query: str, max_results: int, min_views: int = 0, min_outlier_s
         return []
 
     entries = info.get("entries") or []
+    log.info(f"DEBUG: yt-dlp вернул {len(entries)} видео до фильтрации")
 
     # First pass: collect view counts to compute batch average for outlier_score
     view_counts = [
@@ -114,6 +117,7 @@ def _search_sync(query: str, max_results: int, min_views: int = 0, min_outlier_s
     for entry in entries:
         meta = _entry_to_short_meta(entry, avg_views=avg_views)
         if not meta:
+            log.debug(f"Skipped (invalid entry): {entry.get('id')} | title: {entry.get('title')}")
             continue
         if min_views > 0 and (meta.view_count is None or meta.view_count < min_views):
             log.debug(f"Skipped (views={meta.view_count} < min={min_views}) | {meta.video_id}")

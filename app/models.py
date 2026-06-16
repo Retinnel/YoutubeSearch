@@ -24,6 +24,7 @@ class ShortMeta(BaseModel):
     like_count: Optional[int] = None
     outlier_score: Optional[float] = None   # views / batch_avg (keyword search) or views / channel_avg (channel search)
     engagement_rate: Optional[float] = None  # (likes + comments) / views * 100
+    description: Optional[str] = None 
 
 
 class SearchShortsResponse(BaseModel):
